@@ -12,6 +12,9 @@ services:
     stop_grace_period: 30s           # time for graceful shutdown (flush all batches)
     env_file:
       - .env.prod
+    environment:
+      - SCYLLA2CH_DASHBOARD_USER=${DASHBOARD_USER:-admin}
+      - SCYLLA2CH_DASHBOARD_PASS=${DASHBOARD_PASS}
     volumes:
       - ./config/config.prod.yaml:/etc/scylla2ch/config.yaml:ro
       # Uncomment if using ca_cert_path (file) instead of ca_cert_base64 (env var):
@@ -30,7 +33,7 @@ services:
           cpus: "0.25"
           memory: "128M"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "--timeout=5", "http://localhost:8080/"]
+      test: ["CMD", "wget", "-qO-", "--timeout=5", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

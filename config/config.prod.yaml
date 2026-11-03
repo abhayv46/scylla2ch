@@ -88,3 +88,7 @@ metrics:
 
 health:
   port: 8080
+
+dashboard:
+  user: "${SCYLLA2CH_DASHBOARD_USER}"
+  pass: "${SCYLLA2CH_DASHBOARD_PASS}"

@@ -43,6 +43,7 @@ type Config struct {
 	Tables     TablesConfig     `yaml:"tables"`
 	Metrics    MetricsConfig    `yaml:"metrics"`
 	Health     HealthConfig     `yaml:"health"`
+	Dashboard  DashboardConfig  `yaml:"dashboard"`
 
 	tableIndex     map[string]*TableConfig // cached O(1) lookup, built on first GetTableConfig call
 	tableIndexOnce sync.Once
@@ -136,6 +137,11 @@ type MetricsConfig struct {
 
 type HealthConfig struct {
 	Port int `yaml:"port"`
+}
+
+type DashboardConfig struct {
+	User string `yaml:"user"` // also via SCYLLA2CH_DASHBOARD_USER env
+	Pass string `yaml:"pass"` // also via SCYLLA2CH_DASHBOARD_PASS env
 }
 
 // Matches evaluates a simple filter expression against a row.

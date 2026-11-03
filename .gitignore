@@ -2,7 +2,6 @@ scylla2ch
 *.exe
 config.yaml
 .env
-.env.prod
-.env.dev
+.env.*
 certs/
 vendor/

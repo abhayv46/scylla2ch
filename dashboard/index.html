@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scylla2ch dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+  --fg: #c9d1d9; --fg2: #8b949e; --green: #3fb950; --red: #f85149;
+  --yellow: #d29922; --blue: #58a6ff; --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+body { font-family: var(--mono); background: var(--bg); color: var(--fg); min-height: 100vh; }
+a { color: var(--blue); text-decoration: none; }
+
+/* login */
+#login-page { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+#login-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 2rem; width: 340px; }
+#login-box h1 { font-size: 1.1rem; margin-bottom: 1.5rem; color: var(--fg); }
+#login-box input { display: block; width: 100%; padding: 0.5rem 0.75rem; margin-bottom: 0.75rem;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--fg);
+  font-family: var(--mono); font-size: 0.85rem; }
+#login-box button { width: 100%; padding: 0.5rem; background: var(--green); color: var(--bg);
+  border: none; border-radius: 4px; cursor: pointer; font-family: var(--mono); font-weight: 600;
+  font-size: 0.85rem; }
+#login-box button:hover { opacity: 0.9; }
+#login-error { color: var(--red); font-size: 0.8rem; margin-top: 0.5rem; min-height: 1.2em; }
+
+/* dashboard */
+#dashboard { display: none; max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;
+  padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+header h1 { font-size: 1.1rem; }
+header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
+
+/* status bar */
+.status-bar { display: flex; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.status-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+/* totals */
+.totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem;
+  margin-bottom: 1.5rem; }
+.total-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.75rem 1rem; }
+.total-card .label { font-size: 0.7rem; color: var(--fg2); text-transform: uppercase; }
+.total-card .value { font-size: 1.3rem; margin-top: 0.25rem; }
+
+/* add table form */
+.add-form { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+.add-form input { flex: 1; padding: 0.4rem 0.75rem; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--fg); font-family: var(--mono); font-size: 0.8rem; }
+.add-form button { padding: 0.4rem 1rem; background: var(--blue); color: var(--bg); border: none;
+  border-radius: 4px; cursor: pointer; font-family: var(--mono); font-weight: 600; font-size: 0.8rem; }
+
+/* tables */
+.section-title { font-size: 0.85rem; margin-bottom: 0.75rem; color: var(--fg2); }
+.table-grid { display: grid; gap: 0.75rem; }
+.table-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; }
+.table-card .table-header { display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 0.75rem; }
+.table-card .table-name { font-size: 0.9rem; font-weight: 600; }
+.table-card .table-name .ks { color: var(--fg2); font-weight: 400; }
+.table-card .remove-btn { background: none; border: 1px solid var(--border); color: var(--red);
+  border-radius: 4px; padding: 0.15rem 0.5rem; cursor: pointer; font-family: var(--mono);
+  font-size: 0.7rem; }
+.table-card .remove-btn:hover { background: var(--red); color: var(--bg); }
+.table-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 0.5rem; }
+.metric { font-size: 0.75rem; }
+.metric .metric-label { color: var(--fg2); }
+.metric .metric-value { margin-top: 0.15rem; font-size: 0.85rem; }
+.metric .metric-value.warn { color: var(--yellow); }
+.metric .metric-value.bad { color: var(--red); }
+
+/* bar gauge */
+.bar-gauge { height: 4px; background: var(--bg3); border-radius: 2px; margin-top: 0.25rem; overflow: hidden; }
+.bar-gauge .fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+
+/* toast */
+#toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.75rem 1rem; font-size: 0.8rem; display: none; z-index: 100;
+  max-width: 400px; }
+#toast.error { border-color: var(--red); }
+#toast.ok { border-color: var(--green); }
+
+/* responsive */
+@media (max-width: 600px) {
+  .totals { grid-template-columns: repeat(2, 1fr); }
+  .table-metrics { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<!-- Login page -->
+<div id="login-page">
+  <div id="login-box">
+    <h1>scylla2ch</h1>
+    <input type="text" id="login-user" placeholder="username" autocomplete="username">
+    <input type="password" id="login-pass" placeholder="password" autocomplete="current-password">
+    <button onclick="doLogin()">Login</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard">
+  <header>
+    <h1>scylla2ch</h1>
+    <div class="meta">
+      <div id="version"></div>
+      <div id="uptime"></div>
+    </div>
+  </header>
+
+  <div class="status-bar">
+    <div class="status-item"><span class="dot" id="scylla-dot"></span> ScyllaDB</div>
+    <div class="status-item"><span class="dot" id="ch-dot"></span> ClickHouse</div>
+    <div class="status-item" id="config-summary" style="color:var(--fg2)"></div>
+  </div>
+
+  <div class="totals">
+    <div class="total-card"><div class="label">Consumed</div><div class="value" id="total-consumed">-</div></div>
+    <div class="total-card"><div class="label">Flushed</div><div class="value" id="total-flushed">-</div></div>
+    <div class="total-card"><div class="label">Consumers</div><div class="value" id="total-consumers">-</div></div>
+    <div class="total-card"><div class="label">Tables</div><div class="value" id="total-tables">-</div></div>
+  </div>
+
+  <div class="add-form">
+    <input type="text" id="new-table" placeholder="table_name (e.g. user_events)">
+    <button onclick="addTable()">Add Table</button>
+  </div>
+
+  <div class="section-title">Tables</div>
+  <div class="table-grid" id="table-grid"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.getElementById(s);
+
+// --- Login ---
+async function doLogin() {
+  $('login-error').textContent = '';
+  const user = $('login-user').value, pass = $('login-pass').value;
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user, pass})
+    });
+    const d = await r.json();
+    if (d.ok) { showDashboard(); }
+    else { $('login-error').textContent = d.error || 'Login failed'; }
+  } catch(e) { $('login-error').textContent = 'Connection error'; }
+}
+
+$('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+function showDashboard() {
+  $('login-page').style.display = 'none';
+  $('dashboard').style.display = 'block';
+  refresh();
+  setInterval(refresh, 5000);
+}
+
+// --- Check session on load ---
+async function checkSession() {
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) { showDashboard(); }
+  } catch(e) {}
+}
+checkSession();
+
+// --- Dashboard ---
+let statusData = null, metricsData = null;
+
+async function refresh() {
+  try {
+    const [sr, mr] = await Promise.all([fetch('/api/status'), fetch('/api/metrics')]);
+    if (sr.status === 401 || mr.status === 401) {
+      $('dashboard').style.display = 'none';
+      $('login-page').style.display = 'flex';
+      return;
+    }
+    statusData = await sr.json();
+    metricsData = await mr.json();
+    render();
+  } catch(e) { /* network error, retry next tick */ }
+}
+
+function fmt(n) {
+  if (n === undefined || n === null) return '-';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return typeof n === 'number' ? (Number.isInteger(n) ? n.toString() : n.toFixed(2)) : n;
+}
+
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function render() {
+  if (!statusData || !metricsData) return;
+
+  $('version').textContent = 'v' + statusData.version;
+  $('uptime').textContent = fmtUptime(statusData.uptime_seconds);
+
+  $('scylla-dot').className = 'dot ' + (statusData.scylla_connected ? 'green' : 'red');
+  $('ch-dot').className = 'dot ' + (statusData.clickhouse_connected ? 'green' : 'red');
+
+  const c = statusData.config;
+  $('config-summary').textContent = (c.auto_discover ? 'auto-discover' : 'manual') +
+    ' | batch=' + c.batch_size + ' | interval=' + c.batch_interval;
+
+  $('total-consumed').textContent = fmt(metricsData.totals.rows_consumed);
+  $('total-flushed').textContent = fmt(metricsData.totals.rows_flushed);
+  $('total-consumers').textContent = fmt(metricsData.totals.consumers_active);
+  $('total-tables').textContent = fmt(metricsData.totals.tables_active);
+
+  const grid = $('table-grid');
+  // Build sorted list of tables from status
+  const tables = (statusData.tables || []).slice().sort((a,b) => a.fqn.localeCompare(b.fqn));
+  grid.innerHTML = tables.map(t => {
+    const m = (metricsData.tables || {})[t.fqn] || {};
+    const lag = m.cdc_lag_seconds;
+    const lagClass = lag > 60 ? 'bad' : lag > 10 ? 'warn' : '';
+    const dropped = m.rows_dropped || 0;
+    const droppedClass = dropped > 0 ? 'bad' : '';
+    const bufPct = m.buffer_size ? Math.min(100, (m.buffer_size / statusData.config.batch_size) * 100) : 0;
+    const bufColor = bufPct > 80 ? 'var(--red)' : bufPct > 50 ? 'var(--yellow)' : 'var(--green)';
+
+    return `<div class="table-card">
+      <div class="table-header">
+        <span class="table-name"><span class="ks">${t.keyspace}.</span>${t.name}</span>
+        <span style="display:flex;align-items:center;gap:0.5rem">
+          <span class="dot ${t.active ? 'green' : 'red'}"></span>
+          <button class="remove-btn" onclick="removeTable('${t.name}')">remove</button>
+        </span>
+      </div>
+      <div class="table-metrics">
+        <div class="metric"><div class="metric-label">consumed</div><div class="metric-value">${fmt(m.rows_consumed)}</div></div>
+        <div class="metric"><div class="metric-label">flushed</div><div class="metric-value">${fmt(m.rows_flushed)}</div></div>
+        <div class="metric"><div class="metric-label">dropped</div><div class="metric-value ${droppedClass}">${fmt(dropped)}</div></div>
+        <div class="metric"><div class="metric-label">buffer</div><div class="metric-value">${fmt(m.buffer_size)}</div>
+          <div class="bar-gauge"><div class="fill" style="width:${bufPct}%;background:${bufColor}"></div></div>
+        </div>
+        <div class="metric"><div class="metric-label">CDC lag</div><div class="metric-value ${lagClass}">${lag !== undefined ? lag.toFixed(1) + 's' : '-'}</div></div>
+        <div class="metric"><div class="metric-label">flush p50</div><div class="metric-value">${m.flush_latency_p50 !== undefined ? (m.flush_latency_p50*1000).toFixed(1) + 'ms' : '-'}</div></div>
+        <div class="metric"><div class="metric-label">flush p99</div><div class="metric-value">${m.flush_latency_p99 !== undefined ? (m.flush_latency_p99*1000).toFixed(1) + 'ms' : '-'}</div></div>
+        <div class="metric"><div class="metric-label">flushes</div><div class="metric-value">${fmt(m.flushes_ok)}${m.flushes_error ? ' / <span class="bad">' + fmt(m.flushes_error) + ' err</span>' : ''}</div></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// --- Table management ---
+async function addTable() {
+  const name = $('new-table').value.trim();
+  if (!name) return;
+  try {
+    const r = await fetch('/api/tables', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const d = await r.json();
+    toast(d.message || d.error, d.ok);
+    if (d.ok) { $('new-table').value = ''; setTimeout(refresh, 1000); }
+  } catch(e) { toast('Connection error', false); }
+}
+
+async function removeTable(name) {
+  if (!confirm('Remove ' + name + ' from config?\n\nNote: running reader stops on next restart.')) return;
+  try {
+    const r = await fetch('/api/tables?name=' + encodeURIComponent(name), {method: 'DELETE'});
+    const d = await r.json();
+    toast(d.message || d.error, d.ok);
+    if (d.ok) setTimeout(refresh, 1000);
+  } catch(e) { toast('Connection error', false); }
+}
+
+function toast(msg, ok) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = ok ? 'ok' : 'error';
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+</script>
+</body>
+</html>

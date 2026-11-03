@@ -50,6 +50,7 @@ import (
 	"scylla2ch/config"
 	"scylla2ch/consumer"
 	"scylla2ch/converter"
+	"scylla2ch/dashboard"
 	"scylla2ch/metrics"
 	"scylla2ch/writer"
 )
@@ -229,19 +230,35 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// 5. Start health endpoint
+	// Reader state — declared early so the dashboard can reference it.
+	var (
+		running   = make(map[string]bool) // tables with active readers (keyed by keyspace.table)
+		runningMu sync.Mutex
+	)
+
+	// 5. Start health endpoint + dashboard
+	startTime := time.Now()
+	dashState := &dashboard.State{
+		Running:    &running,
+		RunningMu:  &runningMu,
+		Config:     cfg,
+		ConfigFile: cfgFile,
+		StartTime:  startTime,
+		Version:    Version,
+		Logger:     logger,
+		SessionMap: sessionMap,
+		CHDBMap:    chDBMap,
+		CHChecker:  chWriter,
+	}
 	healthServer := &http.Server{
-		Addr: fmt.Sprintf(":%d", cfg.Health.Port),
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		}),
+		Addr:              fmt.Sprintf(":%d", cfg.Health.Port),
+		Handler:           dashboard.NewMux(dashState),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
-		logger.Printf("health endpoint listening on :%d", cfg.Health.Port)
+		logger.Printf("dashboard + health endpoint listening on :%d", cfg.Health.Port)
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Printf("health server error: %v", err)
 		}
@@ -262,8 +279,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Track uptime (must be after ctx declaration)
-	startTime := time.Now()
+	// Track uptime (startTime set above when creating dashboard state)
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -290,11 +306,9 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}
 
 	var (
-		readerWg  sync.WaitGroup          // tracks all reader goroutines
-		running   = make(map[string]bool)  // tables with active readers (keyed by keyspace.table)
-		runningMu sync.Mutex
-		firstErr  error
-		errOnce   sync.Once
+		readerWg sync.WaitGroup // tracks all reader goroutines
+		firstErr error
+		errOnce  sync.Once
 	)
 
 	// startReader launches a CDC reader goroutine for one table.
