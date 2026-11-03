@@ -67,7 +67,20 @@ batch:
 tables:
   auto_discover: false             # manual only — you control which tables stream
   auto_create: false               # manual only — you create ClickHouse tables yourself
-  tables_dir: "/etc/scylla2ch/tables.d"  # each *.yaml = one table (add file + SIGHUP to reload)
+
+  # Add tables here. SIGHUP reloads this list without restart.
+  # docker kill --signal=HUP scylla2ch
+  explicit:
+    - name: "messages"
+    - name: "rooms"
+    - name: "ai_reply_suggestions"
+    - name: "moderation_events"
+    - name: "first_exchange_lifecycle"
+    - name: "llm_mod_windows"
+    - name: "llm_mod_strikes"
+    - name: "posts_by_id"
+    - name: "comments_by_post"
+    - name: "votes_by_post"
 
 metrics:
   port: 9090

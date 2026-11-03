@@ -14,7 +14,6 @@ services:
       - .env.prod
     volumes:
       - ./config/config.prod.yaml:/etc/scylla2ch/config.yaml:ro
-      - ./config/tables.d:/etc/scylla2ch/tables.d:ro    # drop-in table configs
       # Uncomment if using ca_cert_path (file) instead of ca_cert_base64 (env var):
       # - ./certs:/etc/scylla2ch/certs:ro
     tmpfs:
