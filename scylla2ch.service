@@ -1,0 +1,35 @@
+[Unit]
+Description=scylla2ch — Direct ScyllaDB CDC to ClickHouse replicator
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/scylla2ch run --config /etc/scylla2ch/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+EnvironmentFile=/etc/scylla2ch/env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scylla2ch
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+CPUQuota=200%
+
+# Security hardening (same as Docker: no-new-privileges, read-only root)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/scylla2ch
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

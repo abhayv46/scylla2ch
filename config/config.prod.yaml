@@ -1,0 +1,89 @@
+# scylla2ch — PRODUCTION config
+# Read-only CDC replication: ScyllaDB → ClickHouse
+#
+# ACCESS MODEL:
+#   ScyllaDB — READ ONLY:
+#     - Reads CDC log tables (*_scylla_cdc_log) for change events
+#     - Reads system_schema.tables/columns for auto-discovery
+#     - One exception: scylla-cdc-go library writes scylla2ch_progress table
+#       (checkpoint tracking — one row per stream, tiny, unavoidable)
+#     - NEVER reads/writes your production data tables
+#
+#   ClickHouse — INSERT ONLY:
+#     - INSERTs batched CDC rows into existing tables
+#     - Reads system.tables to check if table exists
+#     - You create ClickHouse tables manually (auto_create: false)
+#     - NEVER does CREATE/ALTER/DROP on your ClickHouse tables
+#
+# HOW IT WORKS:
+#   1. Enable CDC on a ScyllaDB table: ALTER TABLE ks.t WITH cdc = {'enabled': true};
+#   2. scylla2ch auto-detects it within 30s (discover_interval)
+#   3. You create the ClickHouse table manually (or use the DDL from `schema.go`)
+#   4. CDC data flows immediately — no restart, no config change
+#
+# ALL VALUES via environment variables — no secrets in this file.
+
+scylla:
+  hosts:
+    - "${SCYLLA_HOST_0}:${SCYLLA_PORT:-9142}"
+    - "${SCYLLA_HOST_1}:${SCYLLA_PORT:-9142}"
+    - "${SCYLLA_HOST_2}:${SCYLLA_PORT:-9142}"
+  port: ${SCYLLA_PORT:-9142}
+  keyspace: "${SCYLLA_KEYSPACE}"
+  username: "${SCYLLA_USER}"
+  password: "${SCYLLA_PASSWORD}"
+  tls: true
+  ca_cert_base64: "${SCYLLA_CA_CERT_BASE64}"  # base64 PEM — K8s secret / env var
+  # ca_cert_path: "/etc/scylla2ch/certs/scylla-cloud-ca.pem"  # alternative: file mount
+  dc: "${SCYLLA_DC}"
+  consistency: "local_quorum"
+
+clickhouse:
+  host: "${CH_HOST}"
+  port: ${CH_PORT:-9440}           # 9440 = native TCP for ClickHouse Cloud
+  database: "${CH_DATABASE}"
+  username: "${CH_USER}"
+  password: "${CH_PASSWORD}"
+  tls: true
+  compression: "lz4"
+  dial_timeout: "2m"
+  max_open_conns: 10               # ≥ number of tables for parallel flushes
+  max_idle_conns: 5
+
+cdc:
+  mode: "delta"
+  confidence_window: "5s"          # ScyllaDB consensus window
+  query_window: "1m"               # CDC log scan window
+  change_age_limit: "8h"           # how far back on first start
+  checkpoint_interval: "60s"       # progress checkpoint frequency
+
+batch:
+  size: 10000                      # flush at 10K rows
+  interval: "5s"                   # or every 5s (whichever first)
+  retry_max: 3                     # 4 total attempts
+  retry_backoff: "500ms"           # exponential: 500ms, 1s, 2s, 4s
+
+tables:
+  auto_discover: true              # zero config — discovers all CDC tables
+  auto_create: false               # false = you create ClickHouse tables manually (INSERT only)
+  discover_interval: "30s"         # check for new CDC tables every 30s
+
+  # Alternative: explicit mode with SIGHUP reload (set auto_discover: false)
+  # tables_dir: "/etc/scylla2ch/tables.d"  # drop-in: add file + docker kill --signal=HUP scylla2ch
+
+  # Optional: skip columns or add routing for auto-discovered tables
+  # overrides:
+  #   - name: "messages"
+  #     skip_columns: ["body_raw", "large_blob"]
+  #   - name: "events"
+  #     routes:
+  #       - target: "click_events"
+  #         filter: "event_type IS NOT NULL"
+  #         columns: [user_id, event_type, created_at]
+
+metrics:
+  port: 9090
+  path: "/metrics"
+
+health:
+  port: 8080

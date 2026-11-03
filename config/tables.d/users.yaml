@@ -1,0 +1,4 @@
+# ScyllaDB table: users (CDC must be enabled)
+# ClickHouse table: auto-created with same name
+name: "users"
+skip_columns: ["avatar_blob"]

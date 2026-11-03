@@ -1,0 +1,14 @@
+--- a/vendor/github.com/gocql/gocql/connectionpool.go
++++ b/vendor/github.com/gocql/gocql/connectionpool.go
+@@ -530,6 +530,12 @@
+ 	if err != nil {
+ 		return err
+ 	}
++
++	// Guard against nil Conn (connectShard returned nil, nil — e.g., when
++	// connecting to ScyllaDB Cloud via public IP and the dial silently fails).
++	if conn == nil {
++		return fmt.Errorf("gocql: connect returned nil connection for host %s", pool.host.ConnectAddress())
++	}
+
+ 	if pool.keyspace != "" {

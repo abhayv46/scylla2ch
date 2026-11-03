@@ -1,0 +1,59 @@
+# scylla2ch — DEV config
+# Minimal config — just run and it discovers all CDC tables automatically.
+#
+# ACCESS: ScyllaDB = read CDC logs only. ClickHouse = INSERT only.
+#
+# HOW TO ADD A TABLE:
+#   1. ALTER TABLE keyspace.my_table WITH cdc = {'enabled': true};
+#   2. Create the ClickHouse table manually (auto_create: false)
+#   3. Wait 10 seconds — scylla2ch detects it and starts streaming
+#   4. Done. No restart, no config change.
+
+scylla:
+  hosts:
+    - "${SCYLLA_HOST_0}:${SCYLLA_PORT:-9142}"
+    - "${SCYLLA_HOST_1}:${SCYLLA_PORT:-9142}"
+    - "${SCYLLA_HOST_2}:${SCYLLA_PORT:-9142}"
+  keyspace: "${SCYLLA_KEYSPACE}"
+  username: "${SCYLLA_USER}"
+  password: "${SCYLLA_PASSWORD}"
+  tls: true
+  ca_cert_path: "${SCYLLA_CA_CERT_PATH:-certs/scylla-cloud-ca.pem}"
+  # ca_cert_base64: "${SCYLLA_CA_CERT_BASE64}"  # alternative: base64 PEM for K8s
+  dc: "${SCYLLA_DC}"
+
+clickhouse:
+  host: "${CH_HOST:-localhost}"
+  port: ${CH_PORT:-9000}           # use 9000 for local, 9440 for ClickHouse Cloud
+  database: "${CH_DATABASE}"
+  username: "${CH_USER:-default}"
+  password: "${CH_PASSWORD:-}"
+  tls: false                       # false for local CH, true for Cloud
+  dial_timeout: "10s"
+  max_open_conns: 5
+  max_idle_conns: 2
+
+cdc:
+  mode: "delta"
+  confidence_window: "2s"          # faster for dev
+  query_window: "10s"
+  change_age_limit: "5m"           # short backfill for dev
+  checkpoint_interval: "30s"
+
+batch:
+  size: 1000                       # smaller for dev — faster feedback
+  interval: "2s"
+  retry_max: 3
+  retry_backoff: "200ms"
+
+tables:
+  auto_discover: true              # zero config — discovers all CDC tables
+  auto_create: false               # false = you create ClickHouse tables manually (INSERT only)
+  discover_interval: "10s"         # fast detection for dev (10s vs 30s prod)
+
+metrics:
+  port: 9090
+  path: "/metrics"
+
+health:
+  port: 8080

@@ -1,0 +1,54 @@
+services:
+  scylla2ch:
+    build:
+      context: .
+      args:
+        VERSION: "${VERSION:-1.0.0}"
+    image: scylla2ch:${VERSION:-latest}
+    container_name: scylla2ch
+    restart: unless-stopped
+    init: true                       # PID 1 reaping — forwards SIGHUP/SIGTERM correctly
+    read_only: true                  # immutable root fs — no writes inside container
+    stop_grace_period: 30s           # time for graceful shutdown (flush all batches)
+    env_file:
+      - .env.prod
+    volumes:
+      - ./config/config.prod.yaml:/etc/scylla2ch/config.yaml:ro
+      - ./config/tables.d:/etc/scylla2ch/tables.d:ro    # drop-in table configs
+      - ./certs:/etc/scylla2ch/certs:ro                  # ScyllaDB Cloud CA cert
+    tmpfs:
+      - /tmp:size=10M                # Go needs /tmp for some ops, tmpfs = RAM-backed
+    ports:
+      - "9090:9090"    # Prometheus metrics
+      - "8080:8080"    # Health endpoint
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: "1G"
+        reservations:
+          cpus: "0.25"
+          memory: "128M"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--timeout=5", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true       # prevent privilege escalation
+
+# ─── Operations ───────────────────────────────────────────────────────
+#
+# Start:        docker compose up -d
+# Stop:         docker compose down
+# SIGHUP:       docker kill --signal=HUP scylla2ch   ← add tables without restart
+# Logs:         docker compose logs -f --tail=100
+# Rebuild:      docker compose build && docker compose up -d
+# Shell:        docker exec -it scylla2ch sh
+# Validate:     docker exec scylla2ch scylla2ch validate --config /etc/scylla2ch/config.yaml

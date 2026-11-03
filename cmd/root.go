@@ -1,0 +1,45 @@
+// Package cmd implements the CLI subcommands for scylla2ch.
+//
+// Subcommands:
+//   - run:      Main CDC streaming loop (cmd/run.go)
+//   - snapshot: Bulk-load ScyllaDB table → ClickHouse (cmd/snapshot.go)
+//   - validate: Connectivity test (cmd/validate.go)
+//
+// All commands share connectScylla() (in run.go) for ScyllaDB session creation,
+// including TLS, CA cert loading (file or base64), and TokenAware routing.
+package cmd
+
+import (
+	"github.com/spf13/cobra"
+)
+
+var cfgFile string
+
+// Version is set at build time via ldflags: -X scylla2ch/cmd.Version=<version>
+var Version = "dev"
+
+var rootCmd = &cobra.Command{
+	Use:   "scylla2ch",
+	Short: "Direct ScyllaDB CDC → ClickHouse replicator",
+	Long: `scylla2ch reads ScyllaDB CDC log tables directly and writes to ClickHouse
+via native TCP. Zero Kafka, zero Debezium, zero Python consumers.
+
+Features:
+  - Auto-discover CDC-enabled tables (zero config)
+  - Auto-create ClickHouse tables from ScyllaDB schema
+  - Dynamic type mapping (all CQL types → ClickHouse)
+  - Channel-per-table architecture (lock-free, back-pressure)
+  - Exponential retry with poison-row protection
+  - Prometheus metrics (throughput, latency, lag, drops)
+  - Graceful shutdown with full buffer drain
+  - Multi-target routing (1 ScyllaDB table → N ClickHouse tables)
+  - CA cert from file or base64 env var (Kubernetes-ready)`,
+}
+
+func init() {
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "/etc/scylla2ch/config.yaml", "config file path")
+}
+
+func Execute() error {
+	return rootCmd.Execute()
+}

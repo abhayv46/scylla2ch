@@ -1,0 +1,77 @@
+# scylla2ch — PRODUCTION 2-3x SCALE config
+# For high-throughput deployments (50+ CDC tables, 100K+ rows/sec aggregate)
+#
+# KEY TUNING vs default prod config:
+#   - batch.size: 10K → 25K (larger batches = fewer ClickHouse round-trips)
+#   - batch.interval: 5s → 3s (faster tail latency for low-traffic tables)
+#   - max_open_conns: 10 → 25 (one per table for parallel flushes)
+#   - max_idle_conns: 5 → 15 (keep connections warm across tables)
+#   - retry_max: 3 → 5 (more resilience to CH Cloud blips)
+#   - retry_backoff: 500ms → 1s (longer initial backoff for network recovery)
+#   - change_age_limit: 8h → 24h (catch up after longer outages)
+#
+# MEMORY FORMULA:
+#   Per table: channel_buf = 2 × batch_size × ~256 bytes/row ≈ 12.8 MB
+#   50 tables: ~640 MB channel buffers + Go runtime overhead
+#   → Allocate 2 GB RAM for 50 tables at 2-3x scale
+#
+# CPU FORMULA:
+#   Each table = 1 goroutine reading CDC + 1 goroutine writing ClickHouse
+#   50 tables = ~100 goroutines (Go scheduler handles this on 4 cores easily)
+#   → Allocate 4 vCPU for 50 tables
+
+scylla:
+  hosts:
+    - "${SCYLLA_HOST_0}:${SCYLLA_PORT:-9142}"
+    - "${SCYLLA_HOST_1}:${SCYLLA_PORT:-9142}"
+    - "${SCYLLA_HOST_2}:${SCYLLA_PORT:-9142}"
+  port: ${SCYLLA_PORT:-9142}
+  keyspace: "${SCYLLA_KEYSPACE}"
+  username: "${SCYLLA_USER}"
+  password: "${SCYLLA_PASSWORD}"
+  tls: true
+  ca_cert_base64: "${SCYLLA_CA_CERT_BASE64}"
+  dc: "${SCYLLA_DC}"
+  consistency: "local_quorum"
+
+clickhouse:
+  host: "${CH_HOST}"
+  port: ${CH_PORT:-9440}
+  database: "${CH_DATABASE}"
+  username: "${CH_USER}"
+  password: "${CH_PASSWORD}"
+  tls: true
+  compression: "lz4"
+  dial_timeout: "2m"
+  max_open_conns: 25               # >= number of tables for parallel flushes
+  max_idle_conns: 15               # keep connections warm
+
+cdc:
+  mode: "delta"
+  confidence_window: "5s"
+  query_window: "1m"
+  change_age_limit: "24h"          # catch up after longer outages
+  checkpoint_interval: "60s"
+
+batch:
+  size: 25000                      # 25K rows per batch (2.5x default)
+  interval: "3s"                   # flush low-traffic tables faster
+  retry_max: 5                     # 6 total attempts — 1s, 2s, 4s, 8s, 16s
+  retry_backoff: "1s"              # exponential: 1s, 2s, 4s, 8s, 16s
+
+tables:
+  auto_discover: true
+  auto_create: false               # false = you create ClickHouse tables manually (INSERT only)
+  discover_interval: "30s"
+
+  # Example: skip large blob columns that aren't needed in analytics
+  # overrides:
+  #   - name: "messages"
+  #     skip_columns: ["body_raw", "media_blob"]
+
+metrics:
+  port: 9090
+  path: "/metrics"
+
+health:
+  port: 8080

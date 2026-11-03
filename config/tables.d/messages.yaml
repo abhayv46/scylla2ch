@@ -1,0 +1,3 @@
+# ScyllaDB table: messages (CDC must be enabled)
+# ClickHouse table: auto-created with same name
+name: "messages"

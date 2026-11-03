@@ -1,0 +1,10 @@
+# Example: route one ScyllaDB table → multiple ClickHouse tables
+# Rename to events.yaml to activate, then: kill -HUP $(pidof scylla2ch)
+name: "events"
+routes:
+  - target: "click_events"
+    filter: "event_type IS NOT NULL"
+    columns: [user_id, event_type, created_at]
+  - target: "page_events"
+    filter: "page_url IS NOT NULL"
+    columns: [user_id, page_url, created_at]

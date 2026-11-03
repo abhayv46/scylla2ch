@@ -1,0 +1,102 @@
+# scylla2ch — Production config
+# Direct ScyllaDB CDC → ClickHouse replicator
+# All values support ${ENV_VAR} expansion
+
+scylla:
+  hosts:
+    - "${SCYLLA_HOST_0}:${SCYLLA_PORT}"
+    - "${SCYLLA_HOST_1}:${SCYLLA_PORT}"
+    - "${SCYLLA_HOST_2}:${SCYLLA_PORT}"
+  port: 9142
+  keyspace: "${SCYLLA_KEYSPACE}"
+  # Multi-keyspace: stream multiple keyspaces (one session per keyspace, each → its own CH database)
+  # keyspaces: ["chat", "analytics", "frnddit"]
+  username: "${SCYLLA_USER}"
+  password: "${SCYLLA_PASSWORD}"
+  tls: true
+  ca_cert_path: "/etc/scylla2ch/certs/scylla-cloud-ca.pem"  # file path
+  # ca_cert_base64: "${SCYLLA_CA_CERT_BASE64}"             # OR base64-encoded PEM (K8s secrets)
+  dc: "${SCYLLA_DC}"
+  consistency: "local_quorum"
+
+clickhouse:
+  host: "${CH_HOST}"
+  port: 9440           # native TCP (not HTTP 8443) — 30% faster, bypasses HTTP proxy
+  protocol: "native"
+  database: "${CH_DATABASE}"
+  username: "${CH_USER}"
+  password: "${CH_PASSWORD}"
+  tls: true
+  compression: "lz4"
+  dial_timeout: "2m"
+  max_open_conns: 10   # tune: ≥ number of tables for parallel flushes
+  max_idle_conns: 5
+
+cdc:
+  mode: "delta"                  # delta (default) or postimage
+  confidence_window: "5s"        # wait for ScyllaDB consensus
+  query_window: "1m"             # CDC log scan window
+  change_age_limit: "8h"         # how far back to read on first start
+  checkpoint_interval: "60s"     # progress save frequency
+
+batch:
+  size: 10000                    # flush when buffer reaches this size
+  interval: "5s"                 # flush timer (whichever comes first)
+  retry_max: 3                   # retries after first attempt (4 total)
+  retry_backoff: "500ms"         # base backoff (exponential: 500ms, 1s, 2s, 4s)
+
+tables:
+  # --- Mode 1: Auto-discover (zero config, polls every discover_interval) ---
+  # auto_discover: true — scans system_schema for CDC-enabled tables
+  # auto_create: true  — auto-creates ClickHouse tables from ScyllaDB schema
+  # discover_interval: how often to re-scan for new CDC tables (hot-reload)
+  #   With this enabled, just ALTER TABLE x WITH cdc = {'enabled': true} on ScyllaDB
+  #   and scylla2ch will auto-detect + auto-create ClickHouse table + start streaming.
+  #   No restart, no config change needed.
+  #
+  # auto_discover: true
+  # auto_create: true
+  # discover_interval: "30s"
+
+  # --- Mode 2: Explicit tables + SIGHUP reload (no polling, you control it) ---
+  # Two ways to define tables: inline (explicit) or drop-in directory (tables_dir).
+  # Both support SIGHUP reload — zero downtime, no restart needed.
+  #
+  # Docker:   docker kill --signal=HUP scylla2ch
+  # systemd:  systemctl reload scylla2ch  (needs ExecReload=/bin/kill -HUP $MAINPID)
+  auto_discover: false
+  auto_create: true                # true = auto-creates ClickHouse table from ScyllaDB schema
+
+  # --- Option A: Inline explicit list ---
+  # explicit:
+  #   - name: "users"
+  #   - name: "messages"
+  #   - name: "payments"          # add + kill -HUP → starts streaming instantly
+
+  # --- Option B: Drop-in directory (like supervisor conf.d/*.conf) ---
+  # Each *.yaml file = one table config. To add a new table:
+  #   1. Create tables.d/payments.yaml with: name: "payments"
+  #   2. kill -HUP $(pidof scylla2ch)
+  #   3. Done — ClickHouse table auto-created, CDC reader started
+  #
+  # File format (each file is a TableConfig):
+  #   name: "payments"                    # simple — same name in ScyllaDB + ClickHouse
+  #   name: "events"                      # with routes — split into multiple CH tables
+  #   skip_columns: ["large_blob"]
+  #   routes:
+  #     - target: "click_events"
+  #       filter: "event_type IS NOT NULL"
+  #       columns: [user_id, event_type, created_at]
+  tables_dir: "tables.d"          # relative to this config file, or absolute path
+
+  # Overrides for auto-discovered tables (skip columns, add routes)
+  # overrides:
+  #   - name: "messages"
+  #     skip_columns: ["body_raw"]
+
+metrics:
+  port: 9090
+  path: "/metrics"
+
+health:
+  port: 8080

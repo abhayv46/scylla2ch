@@ -1,0 +1,8 @@
+scylla2ch
+*.exe
+config.yaml
+.env
+.env.prod
+.env.dev
+certs/
+vendor/
