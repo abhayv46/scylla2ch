@@ -16,10 +16,11 @@
 #     - NEVER does CREATE/ALTER/DROP on your ClickHouse tables
 #
 # HOW IT WORKS:
-#   1. Enable CDC on a ScyllaDB table: ALTER TABLE ks.t WITH cdc = {'enabled': true};
-#   2. scylla2ch auto-detects it within 30s (discover_interval)
-#   3. You create the ClickHouse table manually (or use the DDL from `schema.go`)
-#   4. CDC data flows immediately — no restart, no config change
+#   1. Enable CDC on ScyllaDB: ALTER TABLE ks.t WITH cdc = {'enabled': true};
+#   2. Create ClickHouse table manually (DDL from schema.go or your own)
+#   3. Add table to config/tables.d/<name>.yaml
+#   4. Reload: docker kill --signal=HUP scylla2ch
+#   Nothing is automatic — you control exactly what streams and where.
 #
 # ALL VALUES via environment variables — no secrets in this file.
 
@@ -64,22 +65,9 @@ batch:
   retry_backoff: "500ms"           # exponential: 500ms, 1s, 2s, 4s
 
 tables:
-  auto_discover: true              # zero config — discovers all CDC tables
-  auto_create: false               # false = you create ClickHouse tables manually (INSERT only)
-  discover_interval: "30s"         # check for new CDC tables every 30s
-
-  # Alternative: explicit mode with SIGHUP reload (set auto_discover: false)
-  # tables_dir: "/etc/scylla2ch/tables.d"  # drop-in: add file + docker kill --signal=HUP scylla2ch
-
-  # Optional: skip columns or add routing for auto-discovered tables
-  # overrides:
-  #   - name: "messages"
-  #     skip_columns: ["body_raw", "large_blob"]
-  #   - name: "events"
-  #     routes:
-  #       - target: "click_events"
-  #         filter: "event_type IS NOT NULL"
-  #         columns: [user_id, event_type, created_at]
+  auto_discover: false             # manual only — you control which tables stream
+  auto_create: false               # manual only — you create ClickHouse tables yourself
+  tables_dir: "/etc/scylla2ch/tables.d"  # each *.yaml = one table (add file + SIGHUP to reload)
 
 metrics:
   port: 9090
