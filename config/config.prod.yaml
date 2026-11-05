@@ -60,7 +60,7 @@ cdc:
 
 batch:
   size: 10000                      # flush at 10K rows
-  interval: "5s"                   # or every 5s (whichever first)
+  interval: "2s"                   # or every 2s (whichever first)
   retry_max: 3                     # 4 total attempts
   retry_backoff: "500ms"           # exponential: 500ms, 1s, 2s, 4s
 
