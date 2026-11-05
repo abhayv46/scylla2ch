@@ -114,6 +114,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     <div class="meta">
       <div id="version"></div>
       <div id="uptime"></div>
+      <div id="role-badge" style="font-size:0.7rem;margin-top:0.2rem"></div>
     </div>
   </header>
 
@@ -179,7 +180,7 @@ async function checkSession() {
 checkSession();
 
 // --- Dashboard ---
-let statusData = null, metricsData = null;
+let statusData = null, metricsData = null, userRole = null;
 
 async function refresh() {
   try {
@@ -191,6 +192,10 @@ async function refresh() {
     }
     statusData = await sr.json();
     metricsData = await mr.json();
+    userRole = statusData.role || 'viewer';
+    // Hide add/remove controls for viewers
+    const addForm = document.querySelector('.add-form');
+    if (addForm) addForm.style.display = userRole === 'owner' ? 'flex' : 'none';
     render();
   } catch(e) { /* network error, retry next tick */ }
 }
@@ -221,6 +226,16 @@ function render() {
   $('version').textContent = 'v' + statusData.version;
   $('uptime').textContent = fmtUptime(statusData.uptime_seconds);
 
+  // Role badge
+  const badge = $('role-badge');
+  if (userRole === 'owner') {
+    badge.textContent = 'owner';
+    badge.style.color = 'var(--green)';
+  } else {
+    badge.textContent = 'viewer (read-only)';
+    badge.style.color = 'var(--yellow)';
+  }
+
   $('scylla-dot').className = 'dot ' + (statusData.scylla_connected ? 'green' : 'red');
   $('ch-dot').className = 'dot ' + (statusData.clickhouse_connected ? 'green' : 'red');
 
@@ -250,7 +265,7 @@ function render() {
         <span class="table-name"><span class="ks">${esc(t.keyspace)}.</span>${esc(t.name)}</span>
         <span style="display:flex;align-items:center;gap:0.5rem">
           <span class="dot ${t.active ? 'green' : 'red'}"></span>
-          <button class="remove-btn" onclick="removeTable('${t.name}')">remove</button>
+          ${userRole === 'owner' ? `<button class="remove-btn" onclick="removeTable('${t.name}')">remove</button>` : ''}
         </span>
       </div>
       <div class="table-metrics">

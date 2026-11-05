@@ -62,9 +62,14 @@ type State struct {
 	CHChecker  CHTableChecker            // checks ClickHouse table existence
 }
 
-// session store — token → expiry
+// session store — token → {expiry, role}
+type sessionEntry struct {
+	expiry time.Time
+	role   string // "owner" or "viewer"
+}
+
 var (
-	sessions   = make(map[string]time.Time)
+	sessions   = make(map[string]sessionEntry)
 	sessionsMu sync.Mutex
 )
 
@@ -86,23 +91,31 @@ func genToken() string {
 	return hex.EncodeToString(b)
 }
 
-func validSession(r *http.Request) bool {
+// sessionRole returns the role for a valid session, or "" if invalid/expired.
+func sessionRole(r *http.Request) string {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return false
+		return ""
 	}
 	sessionsMu.Lock()
-	exp, ok := sessions[c.Value]
+	entry, ok := sessions[c.Value]
 	sessionsMu.Unlock()
-	return ok && time.Now().Before(exp)
+	if ok && time.Now().Before(entry.expiry) {
+		return entry.role
+	}
+	return ""
+}
+
+func validSession(r *http.Request) bool {
+	return sessionRole(r) != ""
 }
 
 // cleanExpiredSessions removes expired sessions to prevent unbounded map growth.
 func cleanExpiredSessions() {
 	now := time.Now()
 	sessionsMu.Lock()
-	for k, exp := range sessions {
-		if now.After(exp) {
+	for k, entry := range sessions {
+		if now.After(entry.expiry) {
 			delete(sessions, k)
 		}
 	}
@@ -167,6 +180,18 @@ func getCredentials(cfg *config.Config) (string, string) {
 	return user, pass
 }
 
+func getViewerCredentials(cfg *config.Config) (string, string) {
+	user := os.Getenv("SCYLLA2CH_DASHBOARD_VIEWER_USER")
+	pass := os.Getenv("SCYLLA2CH_DASHBOARD_VIEWER_PASS")
+	if user == "" {
+		user = cfg.Dashboard.ViewerUser
+	}
+	if pass == "" {
+		pass = cfg.Dashboard.ViewerPass
+	}
+	return user, pass
+}
+
 // NewMux returns an http.Handler with all dashboard routes.
 func NewMux(s *State) http.Handler {
 	mux := http.NewServeMux()
@@ -205,8 +230,9 @@ func NewMux(s *State) http.Handler {
 			return
 		}
 
-		cfgUser, cfgPass := getCredentials(s.Config)
-		if cfgUser == "" || cfgPass == "" {
+		ownerUser, ownerPass := getCredentials(s.Config)
+		viewerUser, viewerPass := getViewerCredentials(s.Config)
+		if ownerUser == "" || ownerPass == "" {
 			writeJSON(w, http.StatusForbidden, map[string]interface{}{
 				"ok":    false,
 				"error": "dashboard credentials not configured — set SCYLLA2CH_DASHBOARD_USER and SCYLLA2CH_DASHBOARD_PASS",
@@ -223,9 +249,18 @@ func NewMux(s *State) http.Handler {
 			return
 		}
 
-		userOK := subtle.ConstantTimeCompare([]byte(req.User), []byte(cfgUser)) == 1
-		passOK := subtle.ConstantTimeCompare([]byte(req.Pass), []byte(cfgPass)) == 1
-		if !userOK || !passOK {
+		// Check owner credentials first, then viewer
+		role := ""
+		if subtle.ConstantTimeCompare([]byte(req.User), []byte(ownerUser)) == 1 &&
+			subtle.ConstantTimeCompare([]byte(req.Pass), []byte(ownerPass)) == 1 {
+			role = "owner"
+		} else if viewerUser != "" && viewerPass != "" &&
+			subtle.ConstantTimeCompare([]byte(req.User), []byte(viewerUser)) == 1 &&
+			subtle.ConstantTimeCompare([]byte(req.Pass), []byte(viewerPass)) == 1 {
+			role = "viewer"
+		}
+
+		if role == "" {
 			recordFailedLogin(clientIP)
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"ok": false, "error": "invalid credentials"})
 			return
@@ -238,7 +273,7 @@ func NewMux(s *State) http.Handler {
 
 		token := genToken()
 		sessionsMu.Lock()
-		sessions[token] = time.Now().Add(sessionTTL)
+		sessions[token] = sessionEntry{expiry: time.Now().Add(sessionTTL), role: role}
 		sessionsMu.Unlock()
 
 		http.SetCookie(w, &http.Cookie{
@@ -250,14 +285,14 @@ func NewMux(s *State) http.Handler {
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   int(sessionTTL.Seconds()),
 		})
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "role": role})
 	})
 
-	// Auth middleware for API + dashboard page
+	// Auth middleware for API + dashboard page (any role)
 	authRequired := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			cfgUser, cfgPass := getCredentials(s.Config)
-			if cfgUser == "" || cfgPass == "" {
+			ownerUser, ownerPass := getCredentials(s.Config)
+			if ownerUser == "" || ownerPass == "" {
 				writeJSON(w, http.StatusForbidden, map[string]interface{}{
 					"ok":    false,
 					"error": "dashboard credentials not configured",
@@ -271,6 +306,20 @@ func NewMux(s *State) http.Handler {
 			}
 			next(w, r)
 		}
+	}
+
+	// Owner-only middleware — blocks viewers from write operations
+	ownerRequired := func(next http.HandlerFunc) http.HandlerFunc {
+		return authRequired(func(w http.ResponseWriter, r *http.Request) {
+			if sessionRole(r) != "owner" {
+				writeJSON(w, http.StatusForbidden, map[string]interface{}{
+					"ok":    false,
+					"error": "owner access required — viewers cannot modify tables",
+				})
+				return
+			}
+			next(w, r)
+		})
 	}
 
 	// Dashboard page
@@ -324,6 +373,7 @@ func NewMux(s *State) http.Handler {
 			"tables":              tables,
 			"scylla_connected":    scyllaConn == 1,
 			"clickhouse_connected": chConn == 1,
+			"role":                sessionRole(r),
 			"config": map[string]interface{}{
 				"auto_discover": s.Config.Tables.AutoDiscover,
 				"auto_create":   s.Config.Tables.AutoCreate,
@@ -422,7 +472,7 @@ func NewMux(s *State) http.Handler {
 	}))
 
 	// API: add table
-	mux.HandleFunc("/api/tables", authRequired(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/tables", ownerRequired(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
 			handleAddTable(w, r, s)

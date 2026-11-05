@@ -92,3 +92,5 @@ health:
 dashboard:
   user: "${SCYLLA2CH_DASHBOARD_USER}"
   pass: "${SCYLLA2CH_DASHBOARD_PASS}"
+  viewer_user: "${SCYLLA2CH_DASHBOARD_VIEWER_USER}"
+  viewer_pass: "${SCYLLA2CH_DASHBOARD_VIEWER_PASS}"

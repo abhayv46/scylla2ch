@@ -142,6 +142,10 @@ type HealthConfig struct {
 type DashboardConfig struct {
 	User string `yaml:"user"` // also via SCYLLA2CH_DASHBOARD_USER env
 	Pass string `yaml:"pass"` // also via SCYLLA2CH_DASHBOARD_PASS env
+
+	// Viewer credentials — read-only access (status + metrics, no add/remove tables)
+	ViewerUser string `yaml:"viewer_user"` // also via SCYLLA2CH_DASHBOARD_VIEWER_USER env
+	ViewerPass string `yaml:"viewer_pass"` // also via SCYLLA2CH_DASHBOARD_VIEWER_PASS env
 }
 
 // Matches evaluates a simple filter expression against a row.
