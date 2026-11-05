@@ -131,7 +131,8 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
   </div>
 
   <div class="add-form">
-    <input type="text" id="new-table" placeholder="table_name (e.g. user_events)">
+    <input type="text" id="new-table" placeholder="ScyllaDB table (e.g. messages)">
+    <input type="text" id="new-ch-table" placeholder="ClickHouse table (leave empty = same name)">
     <button onclick="addTable()">Add Table</button>
   </div>
 
@@ -272,14 +273,17 @@ function render() {
 async function addTable() {
   const name = $('new-table').value.trim();
   if (!name) return;
+  const chTable = $('new-ch-table').value.trim();
+  const body = {name};
+  if (chTable && chTable !== name) body.ch_table = chTable;
   try {
     const r = await fetch('/api/tables', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name})
+      body: JSON.stringify(body)
     });
     const d = await r.json();
     toast(d.message || d.error, d.ok);
-    if (d.ok) { $('new-table').value = ''; setTimeout(refresh, 1000); }
+    if (d.ok) { $('new-table').value = ''; $('new-ch-table').value = ''; setTimeout(refresh, 1000); }
   } catch(e) { toast('Connection error', false); }
 }
 

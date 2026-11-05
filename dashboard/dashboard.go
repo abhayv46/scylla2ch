@@ -438,16 +438,24 @@ func NewMux(s *State) http.Handler {
 
 func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	var req struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		CHTable string `json:"ch_table"` // optional: different ClickHouse table name (uses routes)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid JSON"})
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
+	req.CHTable = strings.TrimSpace(req.CHTable)
 	if req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "name is required"})
 		return
+	}
+
+	// ClickHouse target table — defaults to same name as ScyllaDB table
+	chTarget := req.Name
+	if req.CHTable != "" {
+		chTarget = req.CHTable
 	}
 
 	// Check if already in config
@@ -459,7 +467,6 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	}
 
 	// Pre-flight: verify CDC is enabled on ScyllaDB + ClickHouse table exists
-	// Check ALL keyspaces for CDC log companion table
 	keyspaces := s.Config.Scylla.AllKeyspaces()
 	cdcFound := false
 	chFound := false
@@ -486,11 +493,11 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 			continue
 		}
 
-		// Check ClickHouse table exists
+		// Check ClickHouse table exists — use the target name (may differ from ScyllaDB name)
 		chDB = s.CHDBMap[ks]
 		if s.CHChecker != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			exists, err := s.CHChecker.TableExists(ctx, fmt.Sprintf("%s.%s", chDB, req.Name))
+			exists, err := s.CHChecker.TableExists(ctx, fmt.Sprintf("%s.%s", chDB, chTarget))
 			cancel()
 			if err != nil {
 				s.Logger.Printf("dashboard: add table %s: ClickHouse check error: %v", req.Name, err)
@@ -517,25 +524,31 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	if !chFound {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"ok":    false,
-			"error": fmt.Sprintf("ClickHouse table '%s.%s' does not exist — create it first", chDB, req.Name),
+			"error": fmt.Sprintf("ClickHouse table '%s.%s' does not exist — create it first", chDB, chTarget),
 		})
 		return
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
-	if err := modifyConfigTables(s.ConfigFile, req.Name, true); err != nil {
+	// If CH table name differs, use routes config
+	routeTarget := ""
+	if chTarget != req.Name {
+		routeTarget = chTarget
+	}
+	if err := modifyConfigTables(s.ConfigFile, req.Name, true, routeTarget); err != nil {
 		s.Logger.Printf("dashboard: add table %s: %v", req.Name, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
 	}
 
-	// Self-SIGHUP to reload
+	// Self-SIGHUP to reload — zero downtime, new reader starts immediately
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 
-	s.Logger.Printf("dashboard: added table %s (keyspace=%s) to config — CDC verified, CH table verified, SIGHUP sent", req.Name, cdcKeyspace)
+	msg := fmt.Sprintf("added %s → %s.%s — CDC verified, SIGHUP sent", req.Name, chDB, chTarget)
+	s.Logger.Printf("dashboard: %s (keyspace=%s)", msg, cdcKeyspace)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,
-		"message": fmt.Sprintf("added %s — CDC enabled, ClickHouse table exists, SIGHUP sent", req.Name),
+		"message": msg,
 	})
 }
 
@@ -546,7 +559,7 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	if err := modifyConfigTables(s.ConfigFile, name, false); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, name, false, ""); err != nil {
 		s.Logger.Printf("dashboard: remove table %s: %v", name, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -560,7 +573,8 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 }
 
 // modifyConfigTables reads the config YAML, adds or removes a table from tables.explicit, writes back.
-func modifyConfigTables(cfgFile string, tableName string, add bool) error {
+// routeTarget is the ClickHouse table name when it differs from the ScyllaDB table name (empty = same name).
+func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string) error {
 	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -607,13 +621,34 @@ func modifyConfigTables(cfgFile string, tableName string, add bool) error {
 
 	if add {
 		// Add new entry
+		entryContent := []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: tableName, Style: yaml.DoubleQuotedStyle},
+		}
+		// If ClickHouse table name differs, add routes
+		if routeTarget != "" {
+			routeEntry := &yaml.Node{
+				Kind: yaml.MappingNode,
+				Tag:  "!!map",
+				Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "target"},
+					{Kind: yaml.ScalarNode, Tag: "!!str", Value: routeTarget, Style: yaml.DoubleQuotedStyle},
+				},
+			}
+			routesSeq := &yaml.Node{
+				Kind:    yaml.SequenceNode,
+				Tag:     "!!seq",
+				Content: []*yaml.Node{routeEntry},
+			}
+			entryContent = append(entryContent,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "routes"},
+				routesSeq,
+			)
+		}
 		entry := &yaml.Node{
-			Kind: yaml.MappingNode,
-			Tag:  "!!map",
-			Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: tableName, Style: yaml.DoubleQuotedStyle},
-			},
+			Kind:    yaml.MappingNode,
+			Tag:     "!!map",
+			Content: entryContent,
 		}
 		explicitNode.Content = append(explicitNode.Content, entry)
 	} else {
