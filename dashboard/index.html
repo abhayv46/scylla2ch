@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>scylla2ch dashboard</title>
+<title>ScyllaDB → ClickHouse CDC Pipeline</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
@@ -99,7 +99,8 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 <!-- Login page -->
 <div id="login-page">
   <div id="login-box">
-    <h1>scylla2ch</h1>
+    <h1>ScyllaDB → ClickHouse</h1>
+    <div style="font-size:0.7rem;color:var(--fg2);margin-top:-1rem;margin-bottom:1.5rem">CDC Pipeline</div>
     <input type="text" id="login-user" placeholder="username" autocomplete="username">
     <input type="password" id="login-pass" placeholder="password" autocomplete="current-password">
     <button onclick="doLogin()">Login</button>
@@ -110,7 +111,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 <!-- Dashboard -->
 <div id="dashboard">
   <header>
-    <h1>scylla2ch</h1>
+    <div><h1 style="margin-bottom:0.15rem">ScyllaDB → ClickHouse</h1><div style="font-size:0.65rem;color:var(--fg2)">CDC Pipeline</div></div>
     <div class="meta">
       <div id="version"></div>
       <div id="uptime"></div>
@@ -125,19 +126,19 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
   </div>
 
   <div class="totals">
-    <div class="total-card"><div class="label">Consumed</div><div class="value" id="total-consumed">-</div></div>
-    <div class="total-card"><div class="label">Flushed</div><div class="value" id="total-flushed">-</div></div>
-    <div class="total-card"><div class="label">Consumers</div><div class="value" id="total-consumers">-</div></div>
-    <div class="total-card"><div class="label">Tables</div><div class="value" id="total-tables">-</div></div>
+    <div class="total-card"><div class="label">Rows Read</div><div class="value" id="total-consumed">-</div></div>
+    <div class="total-card"><div class="label">Rows Written</div><div class="value" id="total-flushed">-</div></div>
+    <div class="total-card"><div class="label">CDC Streams</div><div class="value" id="total-consumers">-</div></div>
+    <div class="total-card"><div class="label">Active Tables</div><div class="value" id="total-tables">-</div></div>
   </div>
 
   <div class="add-form">
-    <input type="text" id="new-table" placeholder="ScyllaDB table (e.g. messages)">
-    <input type="text" id="new-ch-table" placeholder="ClickHouse table (leave empty = same name)">
-    <button onclick="addTable()">Add Table</button>
+    <input type="text" id="new-table" placeholder="ScyllaDB table name (e.g. messages)">
+    <input type="text" id="new-ch-table" placeholder="ClickHouse target (empty = same name)">
+    <button onclick="addTable()">Stream Table</button>
   </div>
 
-  <div class="section-title">Tables</div>
+  <div class="section-title">Streaming Tables</div>
   <div class="table-grid" id="table-grid"></div>
 </div>
 
@@ -269,16 +270,16 @@ function render() {
         </span>
       </div>
       <div class="table-metrics">
-        <div class="metric"><div class="metric-label">consumed</div><div class="metric-value">${fmt(m.rows_consumed)}</div></div>
-        <div class="metric"><div class="metric-label">flushed</div><div class="metric-value">${fmt(m.rows_flushed)}</div></div>
+        <div class="metric"><div class="metric-label">rows read</div><div class="metric-value">${fmt(m.rows_consumed)}</div></div>
+        <div class="metric"><div class="metric-label">rows written</div><div class="metric-value">${fmt(m.rows_flushed)}</div></div>
         <div class="metric"><div class="metric-label">dropped</div><div class="metric-value ${droppedClass}">${fmt(dropped)}</div></div>
-        <div class="metric"><div class="metric-label">buffer</div><div class="metric-value">${fmt(m.buffer_size)}</div>
+        <div class="metric"><div class="metric-label">write buffer</div><div class="metric-value">${fmt(m.buffer_size)}</div>
           <div class="bar-gauge"><div class="fill" style="width:${bufPct}%;background:${bufColor}"></div></div>
         </div>
         <div class="metric"><div class="metric-label">CDC lag</div><div class="metric-value ${lagClass}">${lag !== undefined ? lag.toFixed(1) + 's' : '-'}</div></div>
-        <div class="metric"><div class="metric-label">flush p50</div><div class="metric-value">${m.flush_latency_p50 !== undefined ? (m.flush_latency_p50*1000).toFixed(1) + 'ms' : '-'}</div></div>
-        <div class="metric"><div class="metric-label">flush p99</div><div class="metric-value">${m.flush_latency_p99 !== undefined ? (m.flush_latency_p99*1000).toFixed(1) + 'ms' : '-'}</div></div>
-        <div class="metric"><div class="metric-label">flushes</div><div class="metric-value">${fmt(m.flushes_ok)}${m.flushes_error ? ' / <span class="bad">' + fmt(m.flushes_error) + ' err</span>' : ''}</div></div>
+        <div class="metric"><div class="metric-label">write p50</div><div class="metric-value">${m.flush_latency_p50 !== undefined ? (m.flush_latency_p50*1000).toFixed(1) + 'ms' : '-'}</div></div>
+        <div class="metric"><div class="metric-label">write p99</div><div class="metric-value">${m.flush_latency_p99 !== undefined ? (m.flush_latency_p99*1000).toFixed(1) + 'ms' : '-'}</div></div>
+        <div class="metric"><div class="metric-label">writes</div><div class="metric-value">${fmt(m.flushes_ok)}${m.flushes_error ? ' / <span class="bad">' + fmt(m.flushes_error) + ' err</span>' : ''}</div></div>
       </div>
     </div>`;
   }).join('');
