@@ -115,6 +115,39 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	keyspaces := cfg.Scylla.AllKeyspaces()
 	logger.Printf("keyspaces: %v", keyspaces)
 
+	// 0. Start dashboard early — serves UI even when databases are unreachable.
+	//    This lets operators see config, add/remove tables, and diagnose connectivity.
+	var (
+		running   = make(map[string]bool)
+		runningMu sync.Mutex
+	)
+	startTime := time.Now()
+	dashState := &dashboard.State{
+		Running:    &running,
+		RunningMu:  &runningMu,
+		Config:     cfg,
+		ConfigFile: cfgFile,
+		StartTime:  startTime,
+		Version:    Version,
+		Logger:     logger,
+		SessionMap: nil,
+		CHDBMap:    nil,
+		CHChecker:  nil,
+	}
+	earlyHealthServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.Health.Port),
+		Handler:           dashboard.NewMux(dashState),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	go func() {
+		logger.Printf("dashboard + health endpoint listening on :%d (pre-connect)", cfg.Health.Port)
+		if err := earlyHealthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Printf("health server error: %v", err)
+		}
+	}()
+
 	// 1. Connect to ScyllaDB — one session per keyspace (gocql sessions are keyspace-bound)
 	var sessions []ksState
 	for _, ks := range keyspaces {
@@ -230,39 +263,11 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Reader state — declared early so the dashboard can reference it.
-	var (
-		running   = make(map[string]bool) // tables with active readers (keyed by keyspace.table)
-		runningMu sync.Mutex
-	)
-
-	// 5. Start health endpoint + dashboard
-	startTime := time.Now()
-	dashState := &dashboard.State{
-		Running:    &running,
-		RunningMu:  &runningMu,
-		Config:     cfg,
-		ConfigFile: cfgFile,
-		StartTime:  startTime,
-		Version:    Version,
-		Logger:     logger,
-		SessionMap: sessionMap,
-		CHDBMap:    chDBMap,
-		CHChecker:  chWriter,
-	}
-	healthServer := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Health.Port),
-		Handler:           dashboard.NewMux(dashState),
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-	go func() {
-		logger.Printf("dashboard + health endpoint listening on :%d", cfg.Health.Port)
-		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Printf("health server error: %v", err)
-		}
-	}()
+	// 5. Upgrade dashboard with live DB references (early server already running)
+	dashState.SessionMap = sessionMap
+	dashState.CHDBMap = chDBMap
+	dashState.CHChecker = chWriter
+	healthServer := earlyHealthServer
 
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

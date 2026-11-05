@@ -473,6 +473,9 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	var cdcKeyspace, chDB string
 
 	for _, ks := range keyspaces {
+		if s.SessionMap == nil {
+			continue
+		}
 		sess := s.SessionMap[ks]
 		if sess == nil {
 			continue
