@@ -53,8 +53,8 @@ clickhouse:
 
 cdc:
   mode: "delta"
-  confidence_window: "5s"          # ScyllaDB consensus window
-  query_window: "1m"               # CDC log scan window
+  confidence_window: "1s"          # matches Kafka Connect scylla.minimal.wait.for.window.time
+  query_window: "10s"              # matches Kafka Connect scylla.query.time.window.size
   change_age_limit: "8h"           # how far back on first start
   checkpoint_interval: "60s"       # progress checkpoint frequency
 
