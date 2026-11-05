@@ -194,6 +194,12 @@ async function refresh() {
   } catch(e) { /* network error, retry next tick */ }
 }
 
+function esc(s) { // prevent XSS — escape HTML entities in dynamic values
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 function fmt(n) {
   if (n === undefined || n === null) return '-';
   if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
@@ -240,7 +246,7 @@ function render() {
 
     return `<div class="table-card">
       <div class="table-header">
-        <span class="table-name"><span class="ks">${t.keyspace}.</span>${t.name}</span>
+        <span class="table-name"><span class="ks">${esc(t.keyspace)}.</span>${esc(t.name)}</span>
         <span style="display:flex;align-items:center;gap:0.5rem">
           <span class="dot ${t.active ? 'green' : 'red'}"></span>
           <button class="remove-btn" onclick="removeTable('${t.name}')">remove</button>

@@ -21,8 +21,7 @@ fi
 if [ ! -d ~/scylla2ch ]; then
     echo ">>> Cloning repo..."
     cd ~
-    git clone --depth 1 --branch akv/feat/scylla2ch https://github.com/interact-gp/dating-app-backend.git scylla2ch-repo
-    ln -sf ~/scylla2ch-repo/scylla2ch ~/scylla2ch
+    git clone --depth 1 https://github.com/abhayv46/scylla2ch.git scylla2ch
 fi
 
 cd ~/scylla2ch

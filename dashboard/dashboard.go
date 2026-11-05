@@ -135,6 +135,26 @@ func recordFailedLogin(ip string) {
 	loginAttemptsMu.Unlock()
 }
 
+// cleanExpiredLoginAttempts removes stale rate-limit entries to prevent unbounded map growth.
+func cleanExpiredLoginAttempts() {
+	cutoff := time.Now().Add(-loginWindow)
+	loginAttemptsMu.Lock()
+	for ip, attempts := range loginAttempts {
+		var recent []time.Time
+		for _, t := range attempts {
+			if t.After(cutoff) {
+				recent = append(recent, t)
+			}
+		}
+		if len(recent) == 0 {
+			delete(loginAttempts, ip)
+		} else {
+			loginAttempts[ip] = recent
+		}
+	}
+	loginAttemptsMu.Unlock()
+}
+
 func getCredentials(cfg *config.Config) (string, string) {
 	user := os.Getenv("SCYLLA2CH_DASHBOARD_USER")
 	pass := os.Getenv("SCYLLA2CH_DASHBOARD_PASS")
@@ -157,10 +177,11 @@ func NewMux(s *State) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// Periodic session cleanup (every 10 minutes)
+	// Periodic session + login attempts cleanup (every 10 minutes)
 	go func() {
 		for range time.Tick(10 * time.Minute) {
 			cleanExpiredSessions()
+			cleanExpiredLoginAttempts()
 		}
 	}()
 
@@ -225,6 +246,7 @@ func NewMux(s *State) http.Handler {
 			Value:    token,
 			Path:     "/",
 			HttpOnly: true,
+			// Secure: true omitted — dashboard accessed via SSM port forwarding (localhost HTTP)
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   int(sessionTTL.Seconds()),
 		})

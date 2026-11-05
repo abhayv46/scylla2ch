@@ -98,8 +98,12 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	}
 	defer session.Close()
 
-	// Validate table name (prevent CQL injection from misconfigured input)
-	if !regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`).MatchString(snapshotTable) {
+	// Validate identifiers (prevent CQL injection from misconfigured input)
+	validIdent := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
+	if !validIdent.MatchString(keyspace) {
+		return fmt.Errorf("invalid keyspace name: %q", keyspace)
+	}
+	if !validIdent.MatchString(snapshotTable) {
 		return fmt.Errorf("invalid table name: %q", snapshotTable)
 	}
 
