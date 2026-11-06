@@ -28,7 +28,7 @@ CPUQuota=200%
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadOnlyPaths=/etc/scylla2ch
+ReadWritePaths=/etc/scylla2ch
 PrivateTmp=true
 
 [Install]

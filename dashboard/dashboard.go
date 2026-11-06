@@ -62,6 +62,10 @@ type State struct {
 	SessionMap map[string]*gocql.Session // keyspace → ScyllaDB session
 	CHDBMap    map[string]string         // keyspace → ClickHouse database
 	CHChecker  CHTableChecker            // checks ClickHouse table existence
+
+	// StopTable cancels the CDC reader for a table and removes it from Running.
+	// Set by cmd/run.go — nil means stop-on-remove is not supported (falls back to restart).
+	StopTable func(fqn string) bool
 }
 
 // session store — token → {expiry, role}
@@ -768,10 +772,36 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	s.Logger.Printf("dashboard: removed table %s from config (reader stops on next restart)", name)
+	// Stop the CDC reader immediately (no restart needed)
+	stopped := false
+	if s.StopTable != nil {
+		// Find the FQN (keyspace.table) from the running map
+		s.RunningMu.Lock()
+		var fqn string
+		for k := range *s.Running {
+			parts := strings.SplitN(k, ".", 2)
+			if len(parts) == 2 && parts[1] == name {
+				fqn = k
+				break
+			}
+		}
+		s.RunningMu.Unlock()
+
+		if fqn != "" {
+			stopped = s.StopTable(fqn)
+		}
+	}
+
+	msg := fmt.Sprintf("removed %s from config", name)
+	if stopped {
+		msg += " — reader stopped"
+	} else {
+		msg += " — reader stops on next restart"
+	}
+	s.Logger.Printf("dashboard: %s", msg)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,
-		"message": fmt.Sprintf("removed %s from config (reader stops on next restart)", name),
+		"message": msg,
 	})
 }
 
@@ -887,7 +917,18 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 		}
 		// Check if actually removed something
 		if len(newContent) == len(explicitNode.Content) {
-			return fmt.Errorf("table %s not found in config", tableName)
+			// Build list of what's in config for debugging
+			var names []string
+			for _, item := range explicitNode.Content {
+				if item.Kind == yaml.MappingNode {
+					for j := 0; j < len(item.Content)-1; j += 2 {
+						if item.Content[j].Value == "name" {
+							names = append(names, item.Content[j+1].Value)
+						}
+					}
+				}
+			}
+			return fmt.Errorf("table %q not found in config (explicit has %d entries: %v) — config may have been overwritten by a deploy", tableName, len(explicitNode.Content), names)
 		}
 		explicitNode.Content = newContent
 	}

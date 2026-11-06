@@ -311,19 +311,25 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}
 
 	var (
-		readerWg sync.WaitGroup // tracks all reader goroutines
-		firstErr error
-		errOnce  sync.Once
+		readerWg      sync.WaitGroup                    // tracks all reader goroutines
+		readerCancels = make(map[string]context.CancelFunc) // per-table cancel for stop-on-remove
+		readerMu      sync.Mutex                        // protects readerCancels
+		firstErr      error
+		errOnce       sync.Once
 	)
 
 	// startReader launches a CDC reader goroutine for one table.
 	// Each table uses the session for its keyspace and its own progress table.
+	// The reader gets a per-table context so it can be stopped individually.
 	startReader := func(sess *gocql.Session, keyspace, tableName string) error {
 		progressTable := fmt.Sprintf("%s.%s", keyspace, config.ProgressTable)
 		progressMgr, err := scyllacdc.NewTableBackedProgressManager(sess, progressTable, "scylla2ch")
 		if err != nil {
 			return fmt.Errorf("progress manager for %s: %w", tableName, err)
 		}
+
+		// Per-reader context: canceled on table remove OR global shutdown
+		readerCtx, readerCancel := context.WithCancel(ctx)
 
 		readerCfg := &scyllacdc.ReaderConfig{
 			Session:               sess,
@@ -340,17 +346,29 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			},
 		}
 
-		reader, err := scyllacdc.NewReader(ctx, readerCfg)
+		reader, err := scyllacdc.NewReader(readerCtx, readerCfg)
 		if err != nil {
+			readerCancel()
 			return fmt.Errorf("cdc reader %s: %w", tableName, err)
 		}
+
+		// Store cancel func for stop-on-remove
+		readerMu.Lock()
+		readerCancels[tableName] = readerCancel
+		readerMu.Unlock()
 
 		logger.Printf("starting CDC reader for %s", tableName)
 		readerWg.Add(1)
 		go func() {
 			defer readerWg.Done()
 			defer metrics.TablesActive.Dec()
-			if err := reader.Run(ctx); err != nil {
+			defer func() {
+				readerMu.Lock()
+				delete(readerCancels, tableName)
+				readerMu.Unlock()
+			}()
+			if err := reader.Run(readerCtx); err != nil && readerCtx.Err() == nil {
+				// Only log as error if NOT canceled (canceled = intentional stop)
 				logger.Printf("ERROR reader %s: %v", tableName, err)
 				metrics.ReaderErrorsTotal.WithLabelValues(tableName).Inc()
 				metrics.ErrorsTotal.WithLabelValues("reader", "error").Inc()
@@ -364,6 +382,26 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		metrics.TablesActive.Inc()
 		return nil
 	}
+
+	// stopTable cancels a single reader and removes from running map.
+	// Called by dashboard remove handler — no restart needed.
+	stopTable := func(fqn string) bool {
+		readerMu.Lock()
+		cancelFn, ok := readerCancels[fqn]
+		readerMu.Unlock()
+		if !ok {
+			return false
+		}
+		logger.Printf("stopping CDC reader for %s (removed via dashboard)", fqn)
+		cancelFn()
+		runningMu.Lock()
+		delete(running, fqn)
+		runningMu.Unlock()
+		return true
+	}
+
+	// Wire stopTable into dashboard so remove button stops readers immediately
+	dashState.StopTable = stopTable
 
 	// Start initial readers (hold mutex to prevent race with hot-reload goroutine)
 	runningMu.Lock()
@@ -403,7 +441,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				return
 			case <-sighupCh:
 				reloadConfig(cfgFile, cfg, disc, chWriter, sessionMap, chDBMap,
-					&running, &runningMu, startReader, ctx, logger)
+					&running, &runningMu, startReader, stopTable, ctx, logger)
 			}
 		}
 	}()
@@ -675,9 +713,8 @@ func connectScylla(cfg *config.Config, keyspace string, logger *log.Logger) (*go
 	return session, nil
 }
 
-// reloadConfig handles SIGHUP: loads new config, starts readers for NEW tables only.
-// Read-only reload — existing readers/sessions are NOT modified.
-// Only tables in existing keyspaces can be added; new keyspaces require a restart.
+// reloadConfig handles SIGHUP: loads new config, starts NEW readers and stops REMOVED readers.
+// Only tables in existing keyspaces can be added; new keyspaces are auto-created.
 func reloadConfig(
 	cfgFile string,
 	oldCfg *config.Config,
@@ -688,6 +725,7 @@ func reloadConfig(
 	running *map[string]bool,
 	runningMu *sync.Mutex,
 	startReader func(sess *gocql.Session, keyspace, tableName string) error,
+	stopTable func(fqn string) bool,
 	ctx context.Context,
 	logger *log.Logger,
 ) {
@@ -814,8 +852,29 @@ func reloadConfig(
 		}
 	}
 
+	// Stop readers for tables removed from config
+	stopped := 0
+	newTableSet := make(map[string]bool, len(newTables))
+	for _, fqn := range newTables {
+		newTableSet[fqn] = true
+	}
+	runningMu.Lock()
+	var toStop []string
+	for fqn := range *running {
+		if !newTableSet[fqn] {
+			toStop = append(toStop, fqn)
+		}
+	}
+	runningMu.Unlock()
+	for _, fqn := range toStop {
+		if stopTable(fqn) {
+			stopped++
+			logger.Printf("SIGHUP reload: stopped CDC reader for %s (removed from config)", fqn)
+		}
+	}
+
 	runningMu.Lock()
 	total := len(*running)
 	runningMu.Unlock()
-	logger.Printf("SIGHUP reload complete: started %d new readers, %d tables total", started, total)
+	logger.Printf("SIGHUP reload complete: started %d, stopped %d, %d tables total", started, stopped, total)
 }
