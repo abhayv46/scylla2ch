@@ -1022,10 +1022,14 @@ func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, 
 	}
 
 	// Check for CH columns that don't exist in ScyllaDB (CDC metadata columns are expected)
-	cdcMetaCols := map[string]bool{"_cdc_operation": true, "_cdc_ts": true}
+	// Also validate CDC metadata column types — scylla2ch sends _cdc_operation as Int8, _cdc_ts as DateTime64
+	cdcMetaExpected := map[string]string{"_cdc_operation": "Int8", "_cdc_ts": "DateTime64"}
 	for _, c := range chCols {
-		if cdcMetaCols[c.Name] {
-			continue // expected CDC metadata columns
+		if expectedType, isCDC := cdcMetaExpected[c.Name]; isCDC {
+			if !strings.Contains(c.Type, expectedType) {
+				warnings = append(warnings, fmt.Sprintf("CDC metadata type mismatch: '%s' — scylla2ch sends %s, but ClickHouse has %s", c.Name, expectedType, c.Type))
+			}
+			continue
 		}
 		if _, exists := scyllaCols[c.Name]; !exists {
 			warnings = append(warnings, fmt.Sprintf("column '%s' (%s) exists in ClickHouse but not in ScyllaDB — will always be NULL", c.Name, c.Type))
