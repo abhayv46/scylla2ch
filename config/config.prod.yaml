@@ -71,33 +71,10 @@ tables:
   auto_discover: false             # manual only — you control which tables stream
   auto_create: false               # manual only — you create ClickHouse tables yourself
 
-  # Add tables here. SIGHUP reloads this list without restart.
-  # docker kill --signal=HUP scylla2ch
+  # Tables managed via dashboard UI — add/remove from :8080
+  # SIGHUP reloads this list without restart.
   # Each table stores its own keyspace — no cross-product, exact match.
-  # Tables added via dashboard automatically get keyspace set.
-  explicit:
-    - name: "messages"
-      keyspace: "chat"
-    - name: "rooms"
-      keyspace: "chat"
-    - name: "ai_reply_suggestions"
-      keyspace: "chat"
-    - name: "moderation_events"
-      keyspace: "chat"
-    - name: "first_exchange_lifecycle"
-      keyspace: "chat"
-    - name: "llm_mod_windows"
-      keyspace: "chat"
-    - name: "llm_mod_strikes"
-      keyspace: "chat"
-    - name: "posts_by_id"
-      keyspace: "frnddit"
-    - name: "comments_by_post"
-      keyspace: "frnddit"
-    - name: "votes_by_post"
-      keyspace: "frnddit"
-    - name: "pending_rooms"
-      keyspace: "chat"
+  explicit: []
 
 metrics:
   port: 9090
