@@ -628,6 +628,7 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		}
 	}
 
+	var cdcCheckErr error
 	for _, ks := range keyspaces {
 		// Check CDC: look for <table>_scylla_cdc_log in system_schema.tables
 		cdcLogTable := scyllaTable + "_scylla_cdc_log"
@@ -635,7 +636,10 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		if err := anySession.Query(
 			"SELECT count(*) FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?",
 			ks, cdcLogTable,
-		).Scan(&count); err == nil && count > 0 {
+		).Scan(&count); err != nil {
+			s.Logger.Printf("dashboard: CDC check for %s.%s failed: %v", ks, cdcLogTable, err)
+			cdcCheckErr = err
+		} else if count > 0 {
 			cdcFound = true
 			cdcKeyspace = ks
 		}
@@ -677,12 +681,18 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	scyllaFQN := scyllaTable
 	if cdcKeyspace != "" {
 		scyllaFQN = cdcKeyspace + "." + scyllaTable
+	} else if scyllaKS != "" {
+		scyllaFQN = scyllaKS + "." + scyllaTable
 	}
 
 	if !cdcFound {
+		errMsg := fmt.Sprintf("CDC not enabled on ScyllaDB table '%s' — run: ALTER TABLE %s WITH cdc = {'enabled': true}", scyllaFQN, scyllaFQN)
+		if cdcCheckErr != nil {
+			errMsg = fmt.Sprintf("ScyllaDB query error checking CDC for '%s': %v", scyllaFQN, cdcCheckErr)
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"ok":    false,
-			"error": fmt.Sprintf("CDC not enabled on ScyllaDB table '%s' — run: ALTER TABLE %s WITH cdc = {'enabled': true}", scyllaFQN, scyllaFQN),
+			"error": errMsg,
 		})
 		return
 	}

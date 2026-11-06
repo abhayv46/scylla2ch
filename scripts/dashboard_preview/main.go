@@ -24,6 +24,10 @@ func (m *mockCHChecker) TableExists(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
 
+func (m *mockCHChecker) TableColumns(_ context.Context, _ string) ([]config.CHColumn, error) {
+	return nil, nil
+}
+
 func main() {
 	running := map[string]bool{
 		"chat.messages":                 true,
