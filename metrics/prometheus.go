@@ -1,6 +1,6 @@
 // Package metrics defines all Prometheus metrics and the metrics HTTP server.
 //
-// Metric categories (19 metrics total):
+// Metric categories (21 metrics total):
 //
 //   Throughput (3):
 //     scylla2ch_rows_consumed_total{table}   — CDC rows read from ScyllaDB
@@ -32,6 +32,10 @@
 //   Error tracking (2):
 //     scylla2ch_errors_total{component,severity}  — errors by component and severity
 //     scylla2ch_reader_errors_total{table}         — per-table reader errors
+//
+//   Last-seen timestamps (2):
+//     scylla2ch_last_consumed_timestamp_ms{table} — Unix ms when last CDC row was consumed
+//     scylla2ch_last_flushed_timestamp_ms{table}  — Unix ms when last batch was flushed to CH
 //
 //   Connection health (3):
 //     scylla2ch_scylla_connected      — 1 if connected, 0 if not
@@ -228,6 +232,24 @@ var (
 		},
 	)
 
+	// --- Last-seen timestamps (for dashboard staleness) ---
+
+	LastConsumedTimestampMs = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scylla2ch_last_consumed_timestamp_ms",
+			Help: "Unix ms when last CDC row was consumed from ScyllaDB, by table",
+		},
+		[]string{"table"},
+	)
+
+	LastFlushedTimestampMs = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scylla2ch_last_flushed_timestamp_ms",
+			Help: "Unix ms when last batch was flushed to ClickHouse, by table",
+		},
+		[]string{"table"},
+	)
+
 	// --- Info ---
 
 	BuildInfo = prometheus.NewGaugeVec(
@@ -260,6 +282,8 @@ func init() {
 		ScyllaConnected,
 		ClickHouseConnected,
 		UptimeSeconds,
+		LastConsumedTimestampMs,
+		LastFlushedTimestampMs,
 		BuildInfo,
 	)
 

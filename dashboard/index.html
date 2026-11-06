@@ -76,6 +76,9 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 .metric .metric-value { margin-top: 0.15rem; font-size: 0.85rem; }
 .metric .metric-value.warn { color: var(--yellow); }
 .metric .metric-value.bad { color: var(--red); }
+.metric .metric-value.stale-ok { color: #4ade80; }
+.metric .metric-value.stale-warning { color: #fbbf24; }
+.metric .metric-value.stale-danger { color: #f87171; }
 
 /* tooltip */
 [data-tip] { position: relative; }
@@ -251,6 +254,30 @@ function fmtUptime(s) {
   return m + 'm';
 }
 
+function fmtAgo(ms) {
+  if (!ms || ms === 0) return '-';
+  const secs = Math.floor((Date.now() - ms) / 1000);
+  if (secs < 0) return 'just now';
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.floor(secs/60) + 'm ago';
+  return Math.floor(secs/3600) + 'h ago';
+}
+
+function staleClass(ms) {
+  if (!ms || ms === 0) return '';
+  const secs = (Date.now() - ms) / 1000;
+  if (secs > 300) return 'stale-danger';
+  if (secs > 60) return 'stale-warning';
+  return 'stale-ok';
+}
+
+function fmtLag(m) {
+  if (!m.last_consumed_ms || !m.last_flushed_ms) return '-';
+  const diff = Math.abs(m.last_consumed_ms - m.last_flushed_ms);
+  if (diff < 1000) return (diff) + 'ms';
+  return (diff / 1000).toFixed(1) + 's';
+}
+
 function render() {
   if (!statusData || !metricsData) return;
 
@@ -283,7 +310,7 @@ function render() {
   // Build sorted list of tables from status
   const tables = (statusData.tables || []).slice().sort((a,b) => a.fqn.localeCompare(b.fqn));
   grid.innerHTML = tables.map(t => {
-    const m = (metricsData.tables || {})[t.fqn] || {};
+    const m = {...((metricsData.tables || {})[t.name] || {}), ...((metricsData.tables || {})[t.fqn] || {})};
     const lag = m.cdc_lag_seconds;
     const lagClass = lag > 60 ? 'bad' : lag > 10 ? 'warn' : '';
     const dropped = m.rows_dropped || 0;
@@ -311,6 +338,9 @@ function render() {
         <div class="metric" data-tip="Median (50th percentile) time to flush\na batch of rows into ClickHouse.\nTypically < 50ms for healthy writes."><div class="metric-label">write p50</div><div class="metric-value">${m.flush_latency_p50 !== undefined ? (m.flush_latency_p50*1000).toFixed(1) + 'ms' : '-'}</div></div>
         <div class="metric" data-tip="99th percentile flush latency — worst-case\nwrite time. If > 500ms, ClickHouse may be\nunder load or network is slow."><div class="metric-label">write p99</div><div class="metric-value">${m.flush_latency_p99 !== undefined ? (m.flush_latency_p99*1000).toFixed(1) + 'ms' : '-'}</div></div>
         <div class="metric" data-tip="Total batch writes to ClickHouse.\nEach write = one INSERT of up to batch_size rows.\nErrors shown in red if any."><div class="metric-label">batch writes</div><div class="metric-value">${fmt(m.flushes_ok)}${m.flushes_error ? ' / <span class="bad">' + fmt(m.flushes_error) + ' err</span>' : ''}</div></div>
+        <div class="metric" data-tip="When the last CDC row was read from ScyllaDB.\nGreen < 1min, yellow < 5min, red > 5min.\nStale = no new writes to this table."><div class="metric-label">last from ScyllaDB</div><div class="metric-value ${staleClass(m.last_consumed_ms)}">${fmtAgo(m.last_consumed_ms)}</div></div>
+        <div class="metric" data-tip="When the last batch was written to ClickHouse.\nGreen < 1min, yellow < 5min, red > 5min.\nStale = flush blocked or no data."><div class="metric-label">last to ClickHouse</div><div class="metric-value ${staleClass(m.last_flushed_ms)}">${fmtAgo(m.last_flushed_ms)}</div></div>
+        <div class="metric" data-tip="Time gap between last read (ScyllaDB) and\nlast write (ClickHouse). Shows how far\nbehind writes are from reads."><div class="metric-label">pipeline lag</div><div class="metric-value">${fmtLag(m)}</div></div>
       </div>
     </div>`;
   }).join('');

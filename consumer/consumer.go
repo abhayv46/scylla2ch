@@ -128,6 +128,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 		}
 
 		metrics.RowsConsumed.WithLabelValues(c.shortTableName()).Inc()
+		metrics.LastConsumedTimestampMs.WithLabelValues(c.shortTableName()).Set(float64(time.Now().UnixMilli()))
 		// Track CDC replication lag (how far behind real-time we are)
 		metrics.CDCLagSeconds.WithLabelValues(c.shortTableName()).Set(time.Since(cdcTime).Seconds())
 	}

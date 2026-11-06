@@ -454,6 +454,16 @@ func NewMux(s *State) http.Handler {
 							perTable[tbl]["flushes_error"] = m.GetCounter().GetValue()
 						}
 					}
+				case "scylla2ch_last_consumed_timestamp_ms":
+					if tbl != "" {
+						ensureTable(perTable, tbl)
+						perTable[tbl]["last_consumed_ms"] = m.GetGauge().GetValue()
+					}
+				case "scylla2ch_last_flushed_timestamp_ms":
+					if tbl != "" {
+						ensureTable(perTable, tbl)
+						perTable[tbl]["last_flushed_ms"] = m.GetGauge().GetValue()
+					}
 				case "scylla2ch_consumers_active":
 					consumersActive = m.GetGauge().GetValue()
 				case "scylla2ch_tables_active":

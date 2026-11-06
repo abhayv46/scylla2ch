@@ -410,6 +410,7 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 		elapsed := time.Since(start).Seconds()
 		w.logger.Printf("flushed table=%s rows=%d duration=%.3fs", table, flushedCount, elapsed)
 		metrics.RowsFlushed.WithLabelValues(table).Add(float64(flushedCount))
+		metrics.LastFlushedTimestampMs.WithLabelValues(table).Set(float64(time.Now().UnixMilli()))
 		metrics.FlushesTotal.WithLabelValues(table, "ok").Inc()
 		metrics.FlushLatency.WithLabelValues(table).Observe(elapsed)
 		metrics.FlushBatchSize.WithLabelValues(table).Observe(float64(flushedCount))
