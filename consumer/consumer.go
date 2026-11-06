@@ -115,7 +115,6 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 		}
 
 		// Add CDC metadata
-		values["_cdc_operation"] = int8(op)
 		cdcTime := change.Time.Time()
 		values["_cdc_ts"] = cdcTime // CDC event time for ReplacingMergeTree version ordering
 
