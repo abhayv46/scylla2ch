@@ -720,10 +720,27 @@ func reloadConfig(
 		newTables = newCfg.TableNames()
 	}
 
-	// Warn about new keyspaces that can't be added without restart
+	// Dynamically create sessions for new keyspaces (no restart needed)
 	for _, ks := range newCfg.Scylla.AllKeyspaces() {
 		if sessionMap[ks] == nil {
-			logger.Printf("WARN SIGHUP reload: keyspace %q not in session map — requires restart to add new keyspaces", ks)
+			logger.Printf("SIGHUP reload: new keyspace %q — creating session on-the-fly", ks)
+			sess, err := connectScylla(newCfg, ks, logger)
+			if err != nil {
+				logger.Printf("ERROR SIGHUP reload: cannot connect to keyspace %q: %v — tables in this keyspace will be skipped", ks, err)
+				metrics.ErrorsTotal.WithLabelValues("reload", "error").Inc()
+				continue
+			}
+			sessionMap[ks] = sess
+			// ClickHouse database = keyspace name for dynamically-added keyspaces
+			chDB := ks
+			chDBMap[ks] = chDB
+			// Ensure ClickHouse database exists
+			ensureCtx, ensureCancel := context.WithTimeout(ctx, 10*time.Second)
+			if dbErr := chWriter.EnsureDatabase(ensureCtx, chDB); dbErr != nil {
+				logger.Printf("WARN SIGHUP reload: auto-create database %s: %v", chDB, dbErr)
+			}
+			ensureCancel()
+			logger.Printf("SIGHUP reload: connected to keyspace %q (ClickHouse DB=%s)", ks, chDB)
 		}
 	}
 

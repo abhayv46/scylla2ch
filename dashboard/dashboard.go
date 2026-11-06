@@ -489,7 +489,7 @@ func NewMux(s *State) http.Handler {
 func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	var req struct {
 		Name    string `json:"name"`
-		CHTable string `json:"ch_table"` // optional: different ClickHouse table name (uses routes)
+		CHTable string `json:"ch_table"` // optional: ClickHouse target (fully-qualified like chat.pending_rooms)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid JSON"})
@@ -502,39 +502,89 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	// ClickHouse target table — defaults to same name as ScyllaDB table
-	chTarget := req.Name
-	if req.CHTable != "" {
-		chTarget = req.CHTable
+	// Parse ScyllaDB input: accept "keyspace.table" or just "table"
+	var scyllaKS, scyllaTable string
+	if parts := strings.SplitN(req.Name, ".", 2); len(parts) == 2 {
+		scyllaKS = parts[0]
+		scyllaTable = parts[1]
+	} else {
+		scyllaTable = req.Name
 	}
+
+	// Parse ClickHouse input: accept "database.table" or just "table"
+	// If fully-qualified (has dot), use as-is. If bare name, we'll prepend the mapped database.
+	chTarget := req.CHTable
+	chFullyQualified := false
+	if chTarget != "" && strings.Contains(chTarget, ".") {
+		chFullyQualified = true
+	}
+	if chTarget == "" {
+		chTarget = scyllaTable // default: same table name
+	}
+
+	// The config stores just the ScyllaDB table name (without keyspace prefix)
+	configName := scyllaTable
 
 	// Check if already in config
 	for _, t := range s.Config.Tables.Explicit {
-		if t.Name == req.Name {
-			writeJSON(w, http.StatusConflict, map[string]interface{}{"ok": false, "error": fmt.Sprintf("%s already in config", req.Name)})
+		if t.Name == configName {
+			writeJSON(w, http.StatusConflict, map[string]interface{}{"ok": false, "error": fmt.Sprintf("%s already in config", configName)})
 			return
 		}
 	}
 
 	// Pre-flight: verify CDC is enabled on ScyllaDB + ClickHouse table exists
-	keyspaces := s.Config.Scylla.AllKeyspaces()
+	// system_schema.tables is cluster-wide — ANY session can query ANY keyspace's tables.
+	// So we grab the first available session and use it for all CDC checks.
+	var anySession *gocql.Session
+	if s.SessionMap != nil {
+		for _, sess := range s.SessionMap {
+			if sess != nil {
+				anySession = sess
+				break
+			}
+		}
+	}
+
 	cdcFound := false
 	chFound := false
-	var cdcKeyspace, chDB string
+	var cdcKeyspace, chFQN string
+
+	if anySession == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"ok": false, "error": "no ScyllaDB session available — is ScyllaDB connected?",
+		})
+		return
+	}
+
+	// Determine which keyspaces to check for the CDC log table
+	var keyspaces []string
+	if scyllaKS != "" {
+		// User specified keyspace explicitly (e.g. "chat.pending_rooms") — only check that one
+		keyspaces = []string{scyllaKS}
+	} else {
+		// Bare table name — search all keyspaces on the cluster dynamically
+		cdcLogTable := scyllaTable + "_scylla_cdc_log"
+		iter := anySession.Query(
+			"SELECT keyspace_name FROM system_schema.tables WHERE table_name = ? ALLOW FILTERING",
+			cdcLogTable,
+		).Iter()
+		var ks string
+		for iter.Scan(&ks) {
+			keyspaces = append(keyspaces, ks)
+		}
+		_ = iter.Close()
+		// If nothing found via dynamic scan, fall back to configured keyspaces
+		if len(keyspaces) == 0 {
+			keyspaces = s.Config.Scylla.AllKeyspaces()
+		}
+	}
 
 	for _, ks := range keyspaces {
-		if s.SessionMap == nil {
-			continue
-		}
-		sess := s.SessionMap[ks]
-		if sess == nil {
-			continue
-		}
-
 		// Check CDC: look for <table>_scylla_cdc_log in system_schema.tables
-		cdcLogTable := req.Name + "_scylla_cdc_log"
+		cdcLogTable := scyllaTable + "_scylla_cdc_log"
 		var count int
-		if err := sess.Query(
+		if err := anySession.Query(
 			"SELECT count(*) FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?",
 			ks, cdcLogTable,
 		).Scan(&count); err == nil && count > 0 {
@@ -546,11 +596,21 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 			continue
 		}
 
-		// Check ClickHouse table exists — use the target name (may differ from ScyllaDB name)
-		chDB = s.CHDBMap[ks]
+		// Build ClickHouse fully-qualified name for existence check
+		if chFullyQualified {
+			chFQN = chTarget // already has database.table, use as-is
+		} else {
+			// Try CHDBMap first, fall back to keyspace name as ClickHouse database
+			chDB := s.CHDBMap[ks]
+			if chDB == "" {
+				chDB = ks // e.g. frnddit keyspace → frnddit database
+			}
+			chFQN = fmt.Sprintf("%s.%s", chDB, chTarget)
+		}
+
 		if s.CHChecker != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			exists, err := s.CHChecker.TableExists(ctx, fmt.Sprintf("%s.%s", chDB, chTarget))
+			exists, err := s.CHChecker.TableExists(ctx, chFQN)
 			cancel()
 			if err != nil {
 				s.Logger.Printf("dashboard: add table %s: ClickHouse check error: %v", req.Name, err)
@@ -566,10 +626,15 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		break
 	}
 
+	scyllaFQN := scyllaTable
+	if cdcKeyspace != "" {
+		scyllaFQN = cdcKeyspace + "." + scyllaTable
+	}
+
 	if !cdcFound {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"ok":    false,
-			"error": fmt.Sprintf("CDC not enabled on ScyllaDB table '%s' — run: ALTER TABLE %s WITH cdc = {'enabled': true}", req.Name, req.Name),
+			"error": fmt.Sprintf("CDC not enabled on ScyllaDB table '%s' — run: ALTER TABLE %s WITH cdc = {'enabled': true}", scyllaFQN, scyllaFQN),
 		})
 		return
 	}
@@ -577,19 +642,19 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	if !chFound {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"ok":    false,
-			"error": fmt.Sprintf("ClickHouse table '%s.%s' does not exist — create it first", chDB, chTarget),
+			"error": fmt.Sprintf("ClickHouse table '%s' does not exist — create it first", chFQN),
 		})
 		return
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
-	// If CH table name differs, use routes config
+	// If CH target differs from ScyllaDB table name, store as route
 	routeTarget := ""
-	if chTarget != req.Name {
+	if chFullyQualified || chTarget != configName {
 		routeTarget = chTarget
 	}
-	if err := modifyConfigTables(s.ConfigFile, req.Name, true, routeTarget); err != nil {
-		s.Logger.Printf("dashboard: add table %s: %v", req.Name, err)
+	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget); err != nil {
+		s.Logger.Printf("dashboard: add table %s: %v", configName, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
 	}
@@ -597,8 +662,8 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	// Self-SIGHUP to reload — zero downtime, new reader starts immediately
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 
-	msg := fmt.Sprintf("added %s → %s.%s — CDC verified, SIGHUP sent", req.Name, chDB, chTarget)
-	s.Logger.Printf("dashboard: %s (keyspace=%s)", msg, cdcKeyspace)
+	msg := fmt.Sprintf("added %s → %s — CDC verified, SIGHUP sent", scyllaFQN, chFQN)
+	s.Logger.Printf("dashboard: %s", msg)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,
 		"message": msg,

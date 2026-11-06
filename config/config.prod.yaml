@@ -31,6 +31,9 @@ scylla:
     - "${SCYLLA_HOST_2}:${SCYLLA_PORT:-9142}"
   port: ${SCYLLA_PORT:-9142}
   keyspace: "${SCYLLA_KEYSPACE}"
+  keyspaces:
+    - "${SCYLLA_KEYSPACE}"
+    - "frnddit"
   username: "${SCYLLA_USER}"
   password: "${SCYLLA_PASSWORD}"
   tls: true
@@ -81,6 +84,7 @@ tables:
     - name: "posts_by_id"
     - name: "comments_by_post"
     - name: "votes_by_post"
+    - name: "pending_rooms"
 
 metrics:
   port: 9090
