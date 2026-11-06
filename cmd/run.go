@@ -720,8 +720,9 @@ func reloadConfig(
 		newTables = newCfg.TableNames()
 	}
 
-	// Dynamically create sessions for new keyspaces (no restart needed)
-	for _, ks := range newCfg.Scylla.AllKeyspaces() {
+	// Dynamically create sessions for new keyspaces (no restart needed).
+	// Uses UniqueKeyspaces() which includes both configured keyspaces AND per-table keyspaces.
+	for _, ks := range newCfg.UniqueKeyspaces() {
 		if sessionMap[ks] == nil {
 			logger.Printf("SIGHUP reload: new keyspace %q — creating session on-the-fly", ks)
 			sess, err := connectScylla(newCfg, ks, logger)

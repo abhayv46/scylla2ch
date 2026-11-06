@@ -426,20 +426,29 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 }
 
 // routeToTargets handles 1 ScyllaDB table → N ClickHouse tables.
-// Currently only ai_reply_suggestions uses this:
-//   - created_at IS NOT NULL AND selected_action IS NULL → ai_reply_suggestions
-//   - selected_action IS NOT NULL OR interacted_at IS NOT NULL → ai_suggestion_feedback
+// Supports:
+//   - 1:1 rename: route with no filter + no columns → all columns, different target name
+//   - Split: route with filter + columns → subset of columns to specific target
+//   - Fully-qualified target: "database.table" used as-is, bare "table" gets chDB prepended
 func (c *Consumer) routeToTargets(values map[string]interface{}, tc *config.TableConfig, onFlush func()) {
 	for _, route := range tc.Routes {
 		if route.Matches(values) {
-			filtered := make(map[string]interface{}, len(route.Columns))
-			for _, col := range route.Columns {
-				if v, ok := values[col]; ok {
-					filtered[col] = v
+			// If columns not specified, pass all columns (1:1 rename / simple mapping)
+			row := values
+			if len(route.Columns) > 0 {
+				row = make(map[string]interface{}, len(route.Columns))
+				for _, col := range route.Columns {
+					if v, ok := values[col]; ok {
+						row[col] = v
+					}
 				}
 			}
-			// Qualify route target with ClickHouse database (multi-keyspace safe)
-			c.writer.Add(c.chDB+"."+route.Target, filtered, onFlush)
+			// If target is fully-qualified (has dot), use as-is; otherwise prepend chDB
+			target := route.Target
+			if !strings.Contains(target, ".") {
+				target = c.chDB + "." + target
+			}
+			c.writer.Add(target, row, onFlush)
 			return
 		}
 	}

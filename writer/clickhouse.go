@@ -528,6 +528,34 @@ func (w *ClickHouseWriter) TableExists(ctx context.Context, table string) (bool,
 	return count > 0, nil
 }
 
+// TableColumns returns column names and types for a ClickHouse table.
+// Used by the dashboard for pre-flight schema comparison.
+func (w *ClickHouseWriter) TableColumns(ctx context.Context, table string) ([]config.CHColumn, error) {
+	db, tablePart := w.db, table
+	if idx := strings.IndexByte(table, '.'); idx != -1 {
+		db = table[:idx]
+		tablePart = table[idx+1:]
+	}
+	rows, err := w.conn.Query(ctx,
+		"SELECT name, type FROM system.columns WHERE database = ? AND table = ? ORDER BY position",
+		db, tablePart,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var cols []config.CHColumn
+	for rows.Next() {
+		var name, typ string
+		if err := rows.Scan(&name, &typ); err != nil {
+			return nil, err
+		}
+		cols = append(cols, config.CHColumn{Name: name, Type: typ})
+	}
+	return cols, rows.Err()
+}
+
 // EnsureDatabase creates a ClickHouse database if it doesn't exist.
 // Used by multi-keyspace mode to auto-create per-keyspace databases.
 func (w *ClickHouseWriter) EnsureDatabase(ctx context.Context, database string) error {

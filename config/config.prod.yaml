@@ -73,18 +73,31 @@ tables:
 
   # Add tables here. SIGHUP reloads this list without restart.
   # docker kill --signal=HUP scylla2ch
+  # Each table stores its own keyspace — no cross-product, exact match.
+  # Tables added via dashboard automatically get keyspace set.
   explicit:
     - name: "messages"
+      keyspace: "chat"
     - name: "rooms"
+      keyspace: "chat"
     - name: "ai_reply_suggestions"
+      keyspace: "chat"
     - name: "moderation_events"
+      keyspace: "chat"
     - name: "first_exchange_lifecycle"
+      keyspace: "chat"
     - name: "llm_mod_windows"
+      keyspace: "chat"
     - name: "llm_mod_strikes"
+      keyspace: "chat"
     - name: "posts_by_id"
+      keyspace: "frnddit"
     - name: "comments_by_post"
+      keyspace: "frnddit"
     - name: "votes_by_post"
+      keyspace: "frnddit"
     - name: "pending_rooms"
+      keyspace: "chat"
 
 metrics:
   port: 9090

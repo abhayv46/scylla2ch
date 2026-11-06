@@ -35,15 +35,17 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"scylla2ch/config"
+	"scylla2ch/converter"
 )
 
 //go:embed index.html
 var indexHTML embed.FS
 
-// CHTableChecker abstracts the ClickHouse writer's TableExists method
-// so the dashboard package doesn't import the writer package directly.
+// CHTableChecker abstracts the ClickHouse writer so the dashboard package
+// doesn't import the writer package directly.
 type CHTableChecker interface {
 	TableExists(ctx context.Context, table string) (bool, error)
+	TableColumns(ctx context.Context, table string) ([]config.CHColumn, error)
 }
 
 // State holds references to live process state for the JSON API.
@@ -483,6 +485,51 @@ func NewMux(s *State) http.Handler {
 		}
 	}))
 
+	// API: schema check — compare ScyllaDB vs ClickHouse column types
+	mux.HandleFunc("/api/schema-check", authRequired(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		scyllaParam := strings.TrimSpace(r.URL.Query().Get("scylla"))  // e.g. "chat.messages"
+		chParam := strings.TrimSpace(r.URL.Query().Get("ch"))          // e.g. "chat.messages"
+		if scyllaParam == "" || chParam == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"ok": false, "error": "scylla and ch query params required (e.g. ?scylla=chat.messages&ch=chat.messages)",
+			})
+			return
+		}
+
+		// Parse ScyllaDB keyspace.table
+		parts := strings.SplitN(scyllaParam, ".", 2)
+		if len(parts) != 2 {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"ok": false, "error": "scylla param must be keyspace.table",
+			})
+			return
+		}
+		ks, tbl := parts[0], parts[1]
+
+		var anySession *gocql.Session
+		if s.SessionMap != nil {
+			for _, sess := range s.SessionMap {
+				if sess != nil {
+					anySession = sess
+					break
+				}
+			}
+		}
+		if anySession == nil || s.CHChecker == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+				"ok": false, "error": "no database sessions available",
+			})
+			return
+		}
+
+		result := schemaCheckDetail(anySession, ks, tbl, chParam, s.CHChecker, s.Logger)
+		writeJSON(w, http.StatusOK, result)
+	}))
+
 	return mux
 }
 
@@ -563,18 +610,19 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		// User specified keyspace explicitly (e.g. "chat.pending_rooms") — only check that one
 		keyspaces = []string{scyllaKS}
 	} else {
-		// Bare table name — search all keyspaces on the cluster dynamically
-		cdcLogTable := scyllaTable + "_scylla_cdc_log"
-		iter := anySession.Query(
-			"SELECT keyspace_name FROM system_schema.tables WHERE table_name = ? ALLOW FILTERING",
-			cdcLogTable,
-		).Iter()
+		// Bare table name — get all keyspaces, then check each with proper partition-key query.
+		// No ALLOW FILTERING — system_schema.keyspaces is tiny and this is a full-PK scan.
+		iter := anySession.Query("SELECT keyspace_name FROM system_schema.keyspaces").Iter()
 		var ks string
 		for iter.Scan(&ks) {
+			// Skip system keyspaces
+			if strings.HasPrefix(ks, "system") {
+				continue
+			}
 			keyspaces = append(keyspaces, ks)
 		}
 		_ = iter.Close()
-		// If nothing found via dynamic scan, fall back to configured keyspaces
+		// If nothing found, fall back to configured keyspaces
 		if len(keyspaces) == 0 {
 			keyspaces = s.Config.Scylla.AllKeyspaces()
 		}
@@ -647,13 +695,19 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
+	// Pre-flight: compare ScyllaDB vs ClickHouse schema for type mismatches
+	var schemaWarnings []string
+	if anySession != nil && s.CHChecker != nil {
+		schemaWarnings = compareSchema(anySession, cdcKeyspace, scyllaTable, chFQN, s.CHChecker, s.Logger)
+	}
+
 	// Both CDC + ClickHouse table verified — save to config
 	// If CH target differs from ScyllaDB table name, store as route
 	routeTarget := ""
 	if chFullyQualified || chTarget != configName {
 		routeTarget = chTarget
 	}
-	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget, cdcKeyspace); err != nil {
 		s.Logger.Printf("dashboard: add table %s: %v", configName, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -663,11 +717,18 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 
 	msg := fmt.Sprintf("added %s → %s — CDC verified, SIGHUP sent", scyllaFQN, chFQN)
+	if len(schemaWarnings) > 0 {
+		msg += fmt.Sprintf(" ⚠ %d schema warning(s)", len(schemaWarnings))
+	}
 	s.Logger.Printf("dashboard: %s", msg)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"ok":      true,
 		"message": msg,
-	})
+	}
+	if len(schemaWarnings) > 0 {
+		resp["warnings"] = schemaWarnings
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
@@ -677,7 +738,7 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	if err := modifyConfigTables(s.ConfigFile, name, false, ""); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, name, false, "", ""); err != nil {
 		s.Logger.Printf("dashboard: remove table %s: %v", name, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -692,7 +753,8 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 
 // modifyConfigTables reads the config YAML, adds or removes a table from tables.explicit, writes back.
 // routeTarget is the ClickHouse table name when it differs from the ScyllaDB table name (empty = same name).
-func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string) error {
+// keyspace is the ScyllaDB keyspace for this table (stored per-table to avoid cross-product).
+func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string, keyspace string) error {
 	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -711,6 +773,11 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
 		return fmt.Errorf("root is not a mapping")
+	}
+
+	// Auto-add keyspace to scylla.keyspaces if not already present
+	if add && keyspace != "" {
+		addKeyspaceToConfig(root, keyspace)
 	}
 
 	// Find "tables" key
@@ -738,10 +805,17 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 	}
 
 	if add {
-		// Add new entry
+		// Add new entry with per-table keyspace
 		entryContent := []*yaml.Node{
 			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
 			{Kind: yaml.ScalarNode, Tag: "!!str", Value: tableName, Style: yaml.DoubleQuotedStyle},
+		}
+		// Store keyspace per table — this avoids cross-product with all keyspaces
+		if keyspace != "" {
+			entryContent = append(entryContent,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "keyspace"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: keyspace, Style: yaml.DoubleQuotedStyle},
+			)
 		}
 		// If ClickHouse table name differs, add routes
 		if routeTarget != "" {
@@ -805,6 +879,48 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 	return nil
 }
 
+// addKeyspaceToConfig adds a keyspace to scylla.keyspaces in the YAML node tree if not already present.
+func addKeyspaceToConfig(root *yaml.Node, keyspace string) {
+	// Find "scylla" key
+	var scyllaNode *yaml.Node
+	for i := 0; i < len(root.Content)-1; i += 2 {
+		if root.Content[i].Value == "scylla" {
+			scyllaNode = root.Content[i+1]
+			break
+		}
+	}
+	if scyllaNode == nil || scyllaNode.Kind != yaml.MappingNode {
+		return
+	}
+
+	// Find "keyspaces" key
+	var ksNode *yaml.Node
+	for i := 0; i < len(scyllaNode.Content)-1; i += 2 {
+		if scyllaNode.Content[i].Value == "keyspaces" {
+			ksNode = scyllaNode.Content[i+1]
+			break
+		}
+	}
+	if ksNode == nil || ksNode.Kind != yaml.SequenceNode {
+		return
+	}
+
+	// Check if keyspace already in the list
+	for _, item := range ksNode.Content {
+		if item.Value == keyspace {
+			return // already present
+		}
+	}
+
+	// Add the new keyspace
+	ksNode.Content = append(ksNode.Content, &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Tag:   "!!str",
+		Value: keyspace,
+		Style: yaml.DoubleQuotedStyle,
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -839,6 +955,186 @@ func readGaugeValue(metricName string) float64 {
 		}
 	}
 	return 0
+}
+
+// compareSchema returns a list of warning strings about ScyllaDB vs ClickHouse column mismatches.
+// Called during add-table pre-flight. Non-blocking — errors return empty warnings.
+func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, checker CHTableChecker, logger *log.Logger) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get ScyllaDB columns (from the base table, not the CDC log)
+	scyllaCols := make(map[string]string) // name → CQL type
+	iter := scyllaSession.Query(
+		"SELECT column_name, type FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?",
+		keyspace, table,
+	).WithContext(ctx).Iter()
+	var colName, colType string
+	for iter.Scan(&colName, &colType) {
+		scyllaCols[colName] = colType
+	}
+	if err := iter.Close(); err != nil {
+		logger.Printf("dashboard schema-check: ScyllaDB columns query error: %v", err)
+		return nil
+	}
+
+	// Get ClickHouse columns
+	chCols, err := checker.TableColumns(ctx, chFQN)
+	if err != nil {
+		logger.Printf("dashboard schema-check: ClickHouse columns query error: %v", err)
+		return nil
+	}
+
+	chColMap := make(map[string]string, len(chCols))
+	for _, c := range chCols {
+		chColMap[c.Name] = c.Type
+	}
+
+	var warnings []string
+
+	// Check each ScyllaDB column against ClickHouse
+	for scyllaCol, cqlType := range scyllaCols {
+		chType, exists := chColMap[scyllaCol]
+		if !exists {
+			// Column missing in ClickHouse — this is OK (CDC delta mode), just note it
+			warnings = append(warnings, fmt.Sprintf("column '%s' (%s) exists in ScyllaDB but not in ClickHouse — will be skipped", scyllaCol, cqlType))
+			continue
+		}
+		// Compare expected type vs actual
+		expectedCH := converter.CQLToClickHouseType(cqlType, false) // assume non-PK for Nullable wrapping
+		if !typeCompatible(expectedCH, chType) {
+			warnings = append(warnings, fmt.Sprintf("type mismatch: column '%s' — ScyllaDB %s → expected CH %s, got CH %s", scyllaCol, cqlType, expectedCH, chType))
+		}
+	}
+
+	// Check for CH columns that don't exist in ScyllaDB (CDC metadata columns are expected)
+	cdcMetaCols := map[string]bool{"_cdc_operation": true, "_cdc_ts": true}
+	for _, c := range chCols {
+		if cdcMetaCols[c.Name] {
+			continue // expected CDC metadata columns
+		}
+		if _, exists := scyllaCols[c.Name]; !exists {
+			warnings = append(warnings, fmt.Sprintf("column '%s' (%s) exists in ClickHouse but not in ScyllaDB — will always be NULL", c.Name, c.Type))
+		}
+	}
+
+	return warnings
+}
+
+// typeCompatible checks if the expected ClickHouse type (from CQL mapping) is compatible
+// with the actual ClickHouse type. Handles Nullable wrapping differences.
+func typeCompatible(expected, actual string) bool {
+	// Normalize: strip Nullable() wrapper for comparison
+	norm := func(t string) string {
+		t = strings.TrimSpace(t)
+		if strings.HasPrefix(t, "Nullable(") && strings.HasSuffix(t, ")") {
+			t = t[len("Nullable(") : len(t)-1]
+		}
+		return strings.TrimSpace(t)
+	}
+	return norm(expected) == norm(actual)
+}
+
+// schemaCheckDetail returns a detailed column-by-column comparison for the API.
+func schemaCheckDetail(scyllaSession *gocql.Session, keyspace, table, chFQN string, checker CHTableChecker, logger *log.Logger) map[string]interface{} {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	type colInfo struct {
+		Name       string `json:"name"`
+		ScyllaType string `json:"scylla_type,omitempty"`
+		ExpectedCH string `json:"expected_ch,omitempty"`
+		ActualCH   string `json:"actual_ch,omitempty"`
+		Status     string `json:"status"` // "ok", "mismatch", "missing_in_ch", "missing_in_scylla", "cdc_meta"
+	}
+
+	// Get ScyllaDB columns
+	scyllaCols := make(map[string]string)
+	var scyllaOrder []string
+	iter := scyllaSession.Query(
+		"SELECT column_name, type FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?",
+		keyspace, table,
+	).WithContext(ctx).Iter()
+	var colName, colType string
+	for iter.Scan(&colName, &colType) {
+		scyllaCols[colName] = colType
+		scyllaOrder = append(scyllaOrder, colName)
+	}
+	if err := iter.Close(); err != nil {
+		return map[string]interface{}{"ok": false, "error": fmt.Sprintf("ScyllaDB query error: %v", err)}
+	}
+
+	// Get ClickHouse columns
+	chCols, err := checker.TableColumns(ctx, chFQN)
+	if err != nil {
+		return map[string]interface{}{"ok": false, "error": fmt.Sprintf("ClickHouse query error: %v", err)}
+	}
+	chColMap := make(map[string]string, len(chCols))
+	for _, c := range chCols {
+		chColMap[c.Name] = c.Type
+	}
+
+	var columns []colInfo
+	cdcMetaCols := map[string]bool{"_cdc_operation": true, "_cdc_ts": true}
+	seen := make(map[string]bool)
+
+	// ScyllaDB columns
+	for _, name := range scyllaOrder {
+		cqlType := scyllaCols[name]
+		expectedCH := converter.CQLToClickHouseType(cqlType, false)
+		seen[name] = true
+
+		ci := colInfo{Name: name, ScyllaType: cqlType, ExpectedCH: expectedCH}
+		if chType, exists := chColMap[name]; exists {
+			ci.ActualCH = chType
+			if typeCompatible(expectedCH, chType) {
+				ci.Status = "ok"
+			} else {
+				ci.Status = "mismatch"
+			}
+		} else {
+			ci.Status = "missing_in_ch"
+		}
+		columns = append(columns, ci)
+	}
+
+	// ClickHouse-only columns
+	for _, c := range chCols {
+		if seen[c.Name] {
+			continue
+		}
+		ci := colInfo{Name: c.Name, ActualCH: c.Type}
+		if cdcMetaCols[c.Name] {
+			ci.Status = "cdc_meta"
+		} else {
+			ci.Status = "missing_in_scylla"
+		}
+		columns = append(columns, ci)
+	}
+
+	// Count issues
+	mismatches, missingCH, missingScy := 0, 0, 0
+	for _, c := range columns {
+		switch c.Status {
+		case "mismatch":
+			mismatches++
+		case "missing_in_ch":
+			missingCH++
+		case "missing_in_scylla":
+			missingScy++
+		}
+	}
+
+	return map[string]interface{}{
+		"ok":                true,
+		"scylla":            keyspace + "." + table,
+		"clickhouse":        chFQN,
+		"columns":           columns,
+		"total_columns":     len(columns),
+		"mismatches":        mismatches,
+		"missing_in_ch":     missingCH,
+		"missing_in_scylla": missingScy,
+	}
 }
 
 // quantileFromHistogram estimates a quantile from a histogram's buckets.

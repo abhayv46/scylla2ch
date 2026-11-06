@@ -35,6 +35,13 @@ import (
 // ProgressTable is the ScyllaDB table name used by scylla-cdc-go for checkpoint tracking.
 const ProgressTable = "scylla2ch_progress"
 
+// CHColumn represents a ClickHouse column name + type.
+// Shared between writer and dashboard packages.
+type CHColumn struct {
+	Name string
+	Type string
+}
+
 type Config struct {
 	Scylla     ScyllaConfig     `yaml:"scylla"`
 	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
@@ -118,6 +125,7 @@ type TablesConfig struct {
 
 type TableConfig struct {
 	Name               string        `yaml:"name"`
+	Keyspace           string        `yaml:"keyspace,omitempty"` // explicit keyspace — avoids cross-product with all keyspaces
 	Routes             []RouteConfig `yaml:"routes,omitempty"`
 	SkipColumns        []string      `yaml:"skip_columns,omitempty"`
 	skipColumnsMap     map[string]bool // cached O(1) lookup, built on first IsColumnSkipped call
@@ -211,16 +219,48 @@ func (c *Config) GetTableConfig(name string) *TableConfig {
 }
 
 // TableNames returns the list of fully-qualified table names (keyspace.table).
-// For multi-keyspace configs, returns tables for ALL keyspaces.
+//
+// If a table has an explicit Keyspace field, it uses that keyspace only.
+// If a table has no Keyspace, it falls back to cross-product with all configured keyspaces
+// (backward compat — but this means the reader must handle "table not found in this keyspace" gracefully).
+//
+// Best practice: always set Keyspace per table. The dashboard does this automatically.
 func (c *Config) TableNames() []string {
-	keyspaces := c.Scylla.AllKeyspaces()
-	names := make([]string, 0, len(c.Tables.Explicit)*len(keyspaces))
-	for _, ks := range keyspaces {
-		for i := range c.Tables.Explicit {
-			names = append(names, fmt.Sprintf("%s.%s", ks, c.Tables.Explicit[i].Name))
+	allKS := c.Scylla.AllKeyspaces()
+	var names []string
+	for i := range c.Tables.Explicit {
+		t := &c.Tables.Explicit[i]
+		if t.Keyspace != "" {
+			// Table has explicit keyspace — no cross-product, exact match
+			names = append(names, fmt.Sprintf("%s.%s", t.Keyspace, t.Name))
+		} else {
+			// No explicit keyspace — cross-product with all keyspaces (backward compat)
+			for _, ks := range allKS {
+				names = append(names, fmt.Sprintf("%s.%s", ks, t.Name))
+			}
 		}
 	}
 	return names
+}
+
+// UniqueKeyspaces returns the deduplicated list of keyspaces referenced by tables.
+// Includes both configured keyspaces and per-table keyspaces.
+func (c *Config) UniqueKeyspaces() []string {
+	seen := make(map[string]bool)
+	for _, ks := range c.Scylla.AllKeyspaces() {
+		seen[ks] = true
+	}
+	for i := range c.Tables.Explicit {
+		if ks := c.Tables.Explicit[i].Keyspace; ks != "" {
+			seen[ks] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for ks := range seen {
+		out = append(out, ks)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // IsColumnSkipped returns true if a column should be skipped for a given table.
