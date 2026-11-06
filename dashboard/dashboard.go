@@ -629,6 +629,7 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	}
 
 	var cdcCheckErr error
+	s.Logger.Printf("dashboard: CDC check: scyllaTable=%q scyllaKS=%q keyspaces=%v", scyllaTable, scyllaKS, keyspaces)
 	for _, ks := range keyspaces {
 		// Check CDC: look for <table>_scylla_cdc_log in system_schema.tables
 		cdcLogTable := scyllaTable + "_scylla_cdc_log"
@@ -639,9 +640,12 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		).Scan(&count); err != nil {
 			s.Logger.Printf("dashboard: CDC check for %s.%s failed: %v", ks, cdcLogTable, err)
 			cdcCheckErr = err
-		} else if count > 0 {
-			cdcFound = true
-			cdcKeyspace = ks
+		} else {
+			s.Logger.Printf("dashboard: CDC check %s.%s count=%d", ks, cdcLogTable, count)
+			if count > 0 {
+				cdcFound = true
+				cdcKeyspace = ks
+			}
 		}
 
 		if !cdcFound {
