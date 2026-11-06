@@ -371,7 +371,7 @@ func Load(path string) (*Config, error) {
 	if cfg.ClickHouse.Database == "" {
 		return nil, fmt.Errorf("clickhouse.database is required")
 	}
-	if !cfg.Tables.AutoDiscover && len(cfg.Tables.Explicit) == 0 {
+	if !cfg.Tables.AutoDiscover && len(cfg.Tables.Explicit) == 0 && cfg.Dashboard.User == "" {
 		return nil, fmt.Errorf("either tables.auto_discover, tables.explicit, or tables.tables_dir is required")
 	}
 

@@ -251,7 +251,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(tableNames) == 0 {
-		return fmt.Errorf("no tables configured — add tables in config or enable auto_discover")
+		logger.Printf("no tables configured — add tables via dashboard at :%d", cfg.Health.Port)
 	}
 
 	// 4. Start metrics server
