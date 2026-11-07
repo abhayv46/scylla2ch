@@ -577,6 +577,59 @@ func NewMux(s *State) http.Handler {
 		writeJSON(w, http.StatusOK, result)
 	}))
 
+	// API: update config (batch size, interval) — owner only
+	mux.HandleFunc("/api/config", ownerRequired(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			BatchSize     *int    `json:"batch_size"`
+			BatchInterval *string `json:"batch_interval"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid JSON"})
+			return
+		}
+
+		changed := false
+		if req.BatchSize != nil {
+			if *req.BatchSize < 100 || *req.BatchSize > 100000 {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "batch_size must be 100-100000"})
+				return
+			}
+			s.Config.Batch.Size = *req.BatchSize
+			changed = true
+		}
+		if req.BatchInterval != nil {
+			d, err := time.ParseDuration(*req.BatchInterval)
+			if err != nil || d < 500*time.Millisecond || d > 60*time.Second {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "batch_interval must be 500ms-60s"})
+				return
+			}
+			s.Config.Batch.Interval = d
+			changed = true
+		}
+
+		if !changed {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "nothing to update"})
+			return
+		}
+
+		if err := modifyConfigBatch(s.ConfigFile, req.BatchSize, req.BatchInterval); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
+
+		// SIGHUP to reload config (writer picks up new batch settings)
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":      true,
+			"message": fmt.Sprintf("config updated: batch_size=%d interval=%s", s.Config.Batch.Size, s.Config.Batch.Interval),
+		})
+	}))
+
 	return mux
 }
 
@@ -1054,6 +1107,70 @@ func addKeyspaceToConfig(root *yaml.Node, keyspace string) {
 		Value: keyspace,
 		Style: yaml.DoubleQuotedStyle,
 	})
+}
+
+// modifyConfigBatch updates batch.size and/or batch.interval in the config YAML file.
+func modifyConfigBatch(cfgFile string, batchSize *int, batchInterval *string) error {
+	data, err := os.ReadFile(cfgFile)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return fmt.Errorf("unexpected yaml structure")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return fmt.Errorf("root is not a mapping")
+	}
+
+	// Find or create "batch" key
+	var batchNode *yaml.Node
+	for i := 0; i < len(root.Content)-1; i += 2 {
+		if root.Content[i].Value == "batch" {
+			batchNode = root.Content[i+1]
+			break
+		}
+	}
+	if batchNode == nil {
+		// Add batch section
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "batch"},
+			&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"},
+		)
+		batchNode = root.Content[len(root.Content)-1]
+	}
+
+	setYAMLField := func(node *yaml.Node, key, value string) {
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			if node.Content[i].Value == key {
+				node.Content[i+1].Value = value
+				return
+			}
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+		)
+	}
+
+	if batchSize != nil {
+		setYAMLField(batchNode, "size", fmt.Sprintf("%d", *batchSize))
+	}
+	if batchInterval != nil {
+		setYAMLField(batchNode, "interval", *batchInterval)
+	}
+
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(cfgFile, out, 0644)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

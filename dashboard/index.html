@@ -9,7 +9,8 @@
 :root {
   --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
   --fg: #c9d1d9; --fg2: #8b949e; --green: #3fb950; --red: #f85149;
-  --yellow: #d29922; --blue: #58a6ff; --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  --yellow: #d29922; --blue: #58a6ff; --purple: #bc8cff; --cyan: #39d2c0;
+  --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 }
 body { font-family: var(--mono); background: var(--bg); color: var(--fg); min-height: 100vh; }
 a { color: var(--blue); text-decoration: none; }
@@ -45,10 +46,32 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 .totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem;
   margin-bottom: 1.5rem; }
 .total-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
-  padding: 0.75rem 1rem; cursor: help; position: relative; }
+  padding: 0.75rem 1rem; cursor: help; position: relative; border-left: 3px solid var(--border); transition: border-color 0.3s; }
+.total-card:nth-child(1) { border-left-color: var(--blue); }
+.total-card:nth-child(2) { border-left-color: var(--green); }
+.total-card:nth-child(3) { border-left-color: var(--purple); }
+.total-card:nth-child(4) { border-left-color: var(--cyan); }
 .total-card .label { font-size: 0.7rem; color: var(--fg2); text-transform: uppercase; }
 .total-card .value { font-size: 1.3rem; margin-top: 0.25rem; }
 .total-card .hint { font-size: 0.6rem; color: var(--fg2); margin-top: 0.15rem; font-style: italic; }
+
+/* config panel */
+.config-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.75rem 1rem; margin-bottom: 1.5rem; }
+.config-panel .config-title { font-size: 0.7rem; color: var(--fg2); text-transform: uppercase; margin-bottom: 0.5rem; }
+.config-row { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
+.config-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; }
+.config-item label { color: var(--fg2); font-size: 0.75rem; }
+.config-item .cfg-val { color: var(--fg); font-weight: 600; min-width: 3rem; text-align: center; }
+.config-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--fg2); border-radius: 3px;
+  width: 22px; height: 22px; cursor: pointer; font-family: var(--mono); font-size: 0.8rem;
+  display: flex; align-items: center; justify-content: center; transition: background 0.2s; }
+.config-btn:hover { background: var(--border); color: var(--fg); }
+
+/* empty state */
+.empty-state { text-align: center; padding: 2rem 1rem; color: var(--fg2); font-size: 0.85rem; }
+.empty-state .empty-icon { font-size: 2rem; margin-bottom: 0.5rem; opacity: 0.5; }
+.empty-state .empty-hint { font-size: 0.75rem; margin-top: 0.5rem; }
 
 /* add table form */
 .add-form { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
@@ -65,6 +88,10 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
   margin-bottom: 0.75rem; }
 .table-card .table-name { font-size: 0.9rem; font-weight: 600; }
 .table-card .table-name .ks { color: var(--fg2); font-weight: 400; }
+.table-card .status-badge { font-size: 0.6rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 600; }
+.table-card .status-badge.running { background: rgba(63,185,80,0.15); color: var(--green); }
+.table-card .status-badge.stopped { background: rgba(248,81,73,0.15); color: var(--red); }
+.table-card .status-badge.isolated { background: rgba(188,140,255,0.15); color: var(--purple); }
 .table-card .remove-btn { background: none; border: 1px solid var(--border); color: var(--red);
   border-radius: 4px; padding: 0.15rem 0.5rem; cursor: pointer; font-family: var(--mono);
   font-size: 0.7rem; }
@@ -141,6 +168,28 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 
   <div id="error-banner" style="display:none;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:6px;padding:0.6rem 1rem;margin-bottom:1rem;font-size:0.8rem;color:var(--red)"></div>
 
+  <div id="config-panel" class="config-panel" style="display:none">
+    <div class="config-title">Pipeline Config</div>
+    <div class="config-row">
+      <div class="config-item" data-tip="Rows per ClickHouse INSERT batch.\nHigher = fewer INSERTs but more memory.\nRange: 100–100,000">
+        <label>batch size</label>
+        <button class="config-btn" onclick="adjustConfig('batch_size', -1000)">−</button>
+        <span class="cfg-val" id="cfg-batch-size">-</span>
+        <button class="config-btn" onclick="adjustConfig('batch_size', 1000)">+</button>
+      </div>
+      <div class="config-item" data-tip="Max time before flushing a partial batch.\nLower = more frequent writes.\nRange: 500ms–60s">
+        <label>batch interval</label>
+        <button class="config-btn" onclick="adjustConfig('batch_interval', -500)">−</button>
+        <span class="cfg-val" id="cfg-batch-interval">-</span>
+        <button class="config-btn" onclick="adjustConfig('batch_interval', 500)">+</button>
+      </div>
+      <div class="config-item">
+        <label style="color:var(--fg2);font-size:0.65rem">auto-discover</label>
+        <span id="cfg-auto-discover" style="font-size:0.75rem">-</span>
+      </div>
+    </div>
+  </div>
+
   <div class="totals">
     <div class="total-card" data-tip="CDC rows read from ScyllaDB CDC log tables.\nEach INSERT/UPDATE/DELETE in ScyllaDB\ngenerates a CDC row that scylla2ch reads.">
       <div class="label">CDC Rows Read</div>
@@ -176,6 +225,11 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 
   <div class="section-title" data-tip="Tables currently streaming CDC changes\nfrom ScyllaDB to ClickHouse in real-time.\nEach table runs independent CDC readers.">Streaming Tables</div>
   <div class="table-grid" id="table-grid"></div>
+  <div class="empty-state" id="empty-state" style="display:none">
+    <div class="empty-icon">⊘</div>
+    <div>No tables streaming yet</div>
+    <div class="empty-hint">Add a table above using <code style="color:var(--blue)">keyspace.table</code> format to start CDC replication</div>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -284,7 +338,13 @@ function fmtLag(m) {
 function render() {
   if (!statusData || !metricsData) return;
 
-  $('version').textContent = 'v' + statusData.version;
+  const ver = statusData.version;
+  const verEl = $('version');
+  verEl.textContent = 'v' + ver;
+  if (ver === 'dev') {
+    verEl.style.color = 'var(--yellow)';
+    verEl.setAttribute('data-tip', 'Build with version:\ngo build -ldflags\n  "-X scylla2ch/cmd.Version=<tag>"\nto set a proper version.');
+  }
   $('uptime').textContent = fmtUptime(statusData.uptime_seconds);
 
   // Role badge
@@ -327,6 +387,18 @@ function render() {
   $('config-summary').textContent = (c.auto_discover ? 'auto-discover' : 'manual') +
     ' | batch=' + c.batch_size + ' | interval=' + c.batch_interval;
 
+  // Config panel (owner only)
+  const cfgPanel = $('config-panel');
+  if (userRole === 'owner') {
+    cfgPanel.style.display = 'block';
+    $('cfg-batch-size').textContent = fmt(c.batch_size);
+    $('cfg-batch-interval').textContent = c.batch_interval;
+    $('cfg-auto-discover').textContent = c.auto_discover ? 'on' : 'off';
+    $('cfg-auto-discover').style.color = c.auto_discover ? 'var(--green)' : 'var(--fg2)';
+  } else {
+    cfgPanel.style.display = 'none';
+  }
+
   $('total-consumed').textContent = fmt(metricsData.totals.rows_consumed);
   $('total-flushed').textContent = fmt(metricsData.totals.rows_flushed);
   $('total-consumers').textContent = fmt(metricsData.totals.consumers_active);
@@ -335,6 +407,9 @@ function render() {
   const grid = $('table-grid');
   // Build sorted list of tables from status
   const tables = (statusData.tables || []).slice().sort((a,b) => a.fqn.localeCompare(b.fqn));
+
+  // Empty state
+  $('empty-state').style.display = tables.length === 0 ? 'block' : 'none';
   grid.innerHTML = tables.map(t => {
     const m = {...((metricsData.tables || {})[t.name] || {}), ...((metricsData.tables || {})[t.fqn] || {})};
     const lag = m.cdc_lag_seconds;
@@ -344,11 +419,17 @@ function render() {
     const bufPct = m.buffer_size ? Math.min(100, (m.buffer_size / statusData.config.batch_size) * 100) : 0;
     const bufColor = bufPct > 80 ? 'var(--red)' : bufPct > 50 ? 'var(--yellow)' : 'var(--green)';
 
-    return `<div class="table-card">
+    const hasErrors = (m.reader_errors || 0) > 0 || (m.rows_dlq || 0) > 0;
+    const cardBorder = !t.active ? 'border-left:3px solid var(--red)' : hasErrors ? 'border-left:3px solid var(--yellow)' : 'border-left:3px solid var(--green)';
+
+    return `<div class="table-card" style="${cardBorder}">
       <div class="table-header">
-        <span class="table-name"><span class="ks">${esc(t.keyspace)}.</span>${esc(t.name)}</span>
         <span style="display:flex;align-items:center;gap:0.5rem">
-          <span class="dot ${t.active ? 'green' : 'red'}"></span>
+          <span class="table-name"><span class="ks">${esc(t.keyspace)}.</span>${esc(t.name)}</span>
+          <span class="status-badge ${t.active ? 'running' : 'stopped'}">${t.active ? 'streaming' : 'stopped'}</span>
+          <span class="status-badge isolated" data-tip="Each table runs its own CDC reader.\nIf this table errors, other tables\ncontinue streaming independently.">isolated</span>
+        </span>
+        <span style="display:flex;align-items:center;gap:0.5rem">
           <button class="remove-btn" style="color:var(--blue);border-color:var(--border)" onclick="schemaCheck('${esc(t.fqn)}')">schema</button>
           ${userRole === 'owner' ? `<button class="remove-btn" onclick="removeTable('${t.name}')">remove</button>` : ''}
         </span>
@@ -467,6 +548,36 @@ async function removeTable(name) {
     const d = await r.json();
     toast(d.message || d.error, d.ok);
     if (d.ok) setTimeout(refresh, 1000);
+  } catch(e) { toast('Connection error', false); }
+}
+
+// --- Config adjustment ---
+async function adjustConfig(field, delta) {
+  if (!statusData) return;
+  const c = statusData.config;
+  const body = {};
+  if (field === 'batch_size') {
+    const newVal = Math.max(100, Math.min(100000, c.batch_size + delta));
+    if (newVal === c.batch_size) return;
+    body.batch_size = newVal;
+  } else if (field === 'batch_interval') {
+    // Parse current interval to ms
+    const cur = c.batch_interval;
+    let ms = 2000; // default
+    if (cur.endsWith('ms')) ms = parseInt(cur);
+    else if (cur.endsWith('s')) ms = parseFloat(cur) * 1000;
+    const newMs = Math.max(500, Math.min(60000, ms + delta));
+    if (newMs === ms) return;
+    body.batch_interval = newMs >= 1000 ? (newMs / 1000) + 's' : newMs + 'ms';
+  }
+  try {
+    const r = await fetch('/api/config', {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    toast(d.message || d.error, d.ok);
+    if (d.ok) setTimeout(refresh, 500);
   } catch(e) { toast('Connection error', false); }
 }
 
