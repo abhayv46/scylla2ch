@@ -43,6 +43,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloudflare/tableflip"
 	"github.com/gocql/gocql"
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 	"github.com/spf13/cobra"
@@ -82,6 +83,30 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 	metrics.SetBuildInfo(Version)
 
+	// Zero-downtime binary upgrades via tableflip (Cloudflare).
+	// Deploy: cp new binary → kill -USR2 $(pidof scylla2ch)
+	// New process inherits HTTP listeners, connects to DBs, resumes CDC from checkpoint.
+	// Old process drains buffered rows and exits. Zero gap for HTTP, ~2s CDC catch-up.
+	upg, err := tableflip.New(tableflip.Options{
+		UpgradeTimeout: 60 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("tableflip init: %w", err)
+	}
+	defer upg.Stop()
+
+	// SIGUSR2 triggers zero-downtime upgrade
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGUSR2)
+		for range sig {
+			logger.Printf("SIGUSR2 received — starting zero-downtime binary upgrade")
+			if err := upg.Upgrade(); err != nil {
+				logger.Printf("upgrade error: %v", err)
+			}
+		}
+	}()
+
 	// Security warnings — log when TLS is off for non-localhost connections
 	isLocalhost := func(host string) bool {
 		h, _, err := net.SplitHostPort(host)
@@ -115,7 +140,17 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	keyspaces := cfg.Scylla.AllKeyspaces()
 	logger.Printf("keyspaces: %v", keyspaces)
 
-	// 0. Start dashboard early — serves UI even when databases are unreachable.
+	// 0. Create listeners via tableflip (inherited from old process during upgrade, or fresh).
+	dashLn, err := upg.Listen("tcp", fmt.Sprintf(":%d", cfg.Health.Port))
+	if err != nil {
+		return fmt.Errorf("listen dashboard :%d: %w", cfg.Health.Port, err)
+	}
+	metricsLn, err := upg.Listen("tcp", fmt.Sprintf(":%d", cfg.Metrics.Port))
+	if err != nil {
+		return fmt.Errorf("listen metrics :%d: %w", cfg.Metrics.Port, err)
+	}
+
+	// Start dashboard early — serves UI even when databases are unreachable.
 	//    This lets operators see config, add/remove tables, and diagnose connectivity.
 	var (
 		running   = make(map[string]bool)
@@ -143,7 +178,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}
 	go func() {
 		logger.Printf("dashboard + health endpoint listening on :%d (pre-connect)", cfg.Health.Port)
-		if err := earlyHealthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := earlyHealthServer.Serve(dashLn); err != nil && err != http.ErrServerClosed {
 			logger.Printf("health server error: %v", err)
 		}
 	}()
@@ -258,7 +293,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	metricsServer := metrics.NewServer(cfg.Metrics)
 	go func() {
 		logger.Printf("metrics server listening on :%d%s", cfg.Metrics.Port, cfg.Metrics.Path)
-		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := metricsServer.Serve(metricsLn); err != nil && err != http.ErrServerClosed {
 			logger.Printf("metrics server error: %v", err)
 		}
 	}()
@@ -280,9 +315,20 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// 6. Graceful shutdown context
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// 6. Graceful shutdown: SIGINT/SIGTERM (manual stop) or tableflip exit (upgrade handoff)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		select {
+		case s := <-sig:
+			logger.Printf("received %v — shutting down", s)
+		case <-upg.Exit():
+			logger.Printf("upgrade handoff complete — old process draining")
+		}
+		cancel()
+	}()
 
 	// Track uptime (startTime set above when creating dashboard state)
 	go func() {
@@ -424,6 +470,12 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}
 	runningMu.Unlock()
 	logger.Printf("started %d CDC readers across %d keyspaces", len(tableNames), len(keyspaces))
+
+	// Signal tableflip: ready to serve. On upgrade, the parent process can now drain and exit.
+	if err := upg.Ready(); err != nil {
+		return fmt.Errorf("tableflip ready: %w", err)
+	}
+	logger.Printf("process ready (pid=%d) — send SIGUSR2 for zero-downtime upgrade", os.Getpid())
 
 	// 8. SIGHUP config reload: re-read config file and start readers for NEW tables only.
 	// Read-only reload — existing readers/sessions are NOT modified (safe, no data races).
