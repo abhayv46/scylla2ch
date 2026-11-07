@@ -94,11 +94,12 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 .bar-gauge .fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
 
 /* toast */
-#toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 0.75rem 1rem; font-size: 0.8rem; display: none; z-index: 100;
-  max-width: 400px; }
-#toast.error { border-color: var(--red); }
-#toast.ok { border-color: var(--green); }
+#toast { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.75rem 1.25rem; font-size: 0.85rem; display: none; z-index: 100;
+  max-width: 500px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); animation: slideDown 0.3s ease; }
+#toast.error { border-color: var(--red); background: rgba(248,81,73,0.15); color: var(--red); }
+#toast.ok { border-color: var(--green); background: rgba(63,185,80,0.15); color: var(--green); }
+@keyframes slideDown { from { opacity: 0; transform: translateX(-50%) translateY(-1rem); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 
 /* responsive */
 @media (max-width: 600px) {

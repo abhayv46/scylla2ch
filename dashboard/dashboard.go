@@ -775,6 +775,12 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
+	// Sync in-memory config so duplicate check stays accurate
+	s.Config.Tables.Explicit = append(s.Config.Tables.Explicit, config.TableConfig{
+		Name:     configName,
+		Keyspace: cdcKeyspace,
+	})
+
 	// Self-SIGHUP to reload — zero downtime, new reader starts immediately
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
 
@@ -805,6 +811,15 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
 	}
+
+	// Sync in-memory config so duplicate check stays accurate
+	newExplicit := make([]config.TableConfig, 0, len(s.Config.Tables.Explicit))
+	for _, t := range s.Config.Tables.Explicit {
+		if t.Name != name {
+			newExplicit = append(newExplicit, t)
+		}
+	}
+	s.Config.Tables.Explicit = newExplicit
 
 	// Stop the CDC reader immediately (no restart needed)
 	stopped := false
