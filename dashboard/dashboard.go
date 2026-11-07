@@ -678,21 +678,42 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	var cdcCheckErr error
 	s.Logger.Printf("dashboard: CDC check: scyllaTable=%q scyllaKS=%q keyspaces=%v", scyllaTable, scyllaKS, keyspaces)
 	for _, ks := range keyspaces {
-		// Check CDC: query the BASE table's cdc config from system_schema.scylla_tables
-		// This is the source of truth — checking for _scylla_cdc_log in system_schema.tables
-		// can false-positive from stale schema metadata across nodes.
+		// Check CDC using two methods:
+		// 1. Primary: query base table's cdc config from system_schema.scylla_tables (source of truth)
+		// 2. Fallback: check if <table>_scylla_cdc_log exists in system_schema.tables
+		//    (works on all ScyllaDB versions, but can false-positive from stale schema metadata)
+
+		// Method 1: scylla_tables cdc config
 		var cdcConfig map[string]string
 		if err := anySession.Query(
 			"SELECT cdc FROM system_schema.scylla_tables WHERE keyspace_name = ? AND table_name = ?",
 			ks, scyllaTable,
 		).Scan(&cdcConfig); err != nil {
-			s.Logger.Printf("dashboard: CDC config check for %s.%s failed: %v", ks, scyllaTable, err)
-			cdcCheckErr = err
+			s.Logger.Printf("dashboard: CDC config check for %s.%s failed (trying fallback): %v", ks, scyllaTable, err)
 		} else {
 			s.Logger.Printf("dashboard: CDC config %s.%s cdc=%v", ks, scyllaTable, cdcConfig)
 			if cdcConfig["enabled"] == "true" {
 				cdcFound = true
 				cdcKeyspace = ks
+			}
+		}
+
+		// Method 2: fallback — check CDC log table exists
+		if !cdcFound {
+			cdcLogTable := scyllaTable + "_scylla_cdc_log"
+			var count int
+			if err := anySession.Query(
+				"SELECT count(*) FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?",
+				ks, cdcLogTable,
+			).Scan(&count); err != nil {
+				s.Logger.Printf("dashboard: CDC fallback check for %s.%s failed: %v", ks, cdcLogTable, err)
+				cdcCheckErr = err
+			} else {
+				s.Logger.Printf("dashboard: CDC fallback %s.%s count=%d", ks, cdcLogTable, count)
+				if count > 0 {
+					cdcFound = true
+					cdcKeyspace = ks
+				}
 			}
 		}
 
