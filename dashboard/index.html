@@ -138,6 +138,8 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     <div class="status-item" id="config-summary" style="color:var(--fg2)"></div>
   </div>
 
+  <div id="error-banner" style="display:none;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:6px;padding:0.6rem 1rem;margin-bottom:1rem;font-size:0.8rem;color:var(--red)"></div>
+
   <div class="totals">
     <div class="total-card" data-tip="CDC rows read from ScyllaDB CDC log tables.\nEach INSERT/UPDATE/DELETE in ScyllaDB\ngenerates a CDC row that scylla2ch reads.">
       <div class="label">CDC Rows Read</div>
@@ -163,7 +165,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 
   <div style="font-size:0.65rem;color:var(--fg2);margin-bottom:0.4rem">
     Add a new table to stream CDC changes. Enter <code style="color:var(--blue)">keyspace.table</code> — the keyspace is auto-detected if omitted.
-    New keyspaces are discovered automatically.
+    ClickHouse table must already exist. New keyspaces are discovered automatically.
   </div>
   <div class="add-form">
     <input type="text" id="new-table" placeholder="keyspace.table (e.g. chat.pending_rooms)" data-tip="ScyllaDB table name.\nUse keyspace.table format\nor just table name to auto-detect.">
@@ -297,6 +299,29 @@ function render() {
   $('scylla-dot').className = 'dot ' + (statusData.scylla_connected ? 'green' : 'red');
   $('ch-dot').className = 'dot ' + (statusData.clickhouse_connected ? 'green' : 'red');
 
+  // Error banner — show when something is down or has errors
+  const errors = [];
+  if (!statusData.scylla_connected) errors.push('ScyllaDB disconnected');
+  if (!statusData.clickhouse_connected) errors.push('ClickHouse disconnected — writer paused, rows buffered');
+  const tbls = metricsData.tables || {};
+  let totalDLQ = 0, totalReaderErr = 0, stoppedTables = [];
+  for (const t of (statusData.tables || [])) {
+    const m = {...(tbls[t.name] || {}), ...(tbls[t.fqn] || {})};
+    totalDLQ += (m.rows_dlq || 0);
+    totalReaderErr += (m.reader_errors || 0);
+    if (!t.active) stoppedTables.push(t.name);
+  }
+  if (totalDLQ > 0) errors.push(totalDLQ + ' poison row(s) in DLQ — check dlq/ directory');
+  if (totalReaderErr > 0) errors.push(totalReaderErr + ' reader error(s)');
+  if (stoppedTables.length > 0) errors.push('Stopped: ' + stoppedTables.join(', '));
+  const banner = $('error-banner');
+  if (errors.length > 0) {
+    banner.innerHTML = errors.join(' · ');
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+
   const c = statusData.config;
   $('config-summary').textContent = (c.auto_discover ? 'auto-discover' : 'manual') +
     ' | batch=' + c.batch_size + ' | interval=' + c.batch_interval;
@@ -338,6 +363,9 @@ function render() {
         <div class="metric" data-tip="Median (50th percentile) time to flush\na batch of rows into ClickHouse.\nTypically < 50ms for healthy writes."><div class="metric-label">write p50</div><div class="metric-value">${m.flush_latency_p50 !== undefined ? (m.flush_latency_p50*1000).toFixed(1) + 'ms' : '-'}</div></div>
         <div class="metric" data-tip="99th percentile flush latency — worst-case\nwrite time. If > 500ms, ClickHouse may be\nunder load or network is slow."><div class="metric-label">write p99</div><div class="metric-value">${m.flush_latency_p99 !== undefined ? (m.flush_latency_p99*1000).toFixed(1) + 'ms' : '-'}</div></div>
         <div class="metric" data-tip="Total batch writes to ClickHouse.\nEach write = one INSERT of up to batch_size rows.\nErrors shown in red if any."><div class="metric-label">batch writes</div><div class="metric-value">${fmt(m.flushes_ok)}${m.flushes_error ? ' / <span class="bad">' + fmt(m.flushes_error) + ' err</span>' : ''}</div></div>
+        <div class="metric" data-tip="Poison rows sent to DLQ (dead letter queue).\nStructural errors like type mismatches.\nCheck dlq/ directory for details."><div class="metric-label">DLQ rows</div><div class="metric-value ${(m.rows_dlq || 0) > 0 ? 'bad' : ''}">${fmt(m.rows_dlq || 0)}</div></div>
+        <div class="metric" data-tip="ClickHouse flush retry attempts.\nTransient errors (network, timeout) are retried.\nHigh count = ClickHouse under load."><div class="metric-label">retries</div><div class="metric-value ${(m.retries || 0) > 10 ? 'warn' : ''}">${fmt(m.retries || 0)}</div></div>
+        <div class="metric" data-tip="CDC reader errors for this table.\nIf > 0, the reader may have stopped.\nCheck if the dot is red."><div class="metric-label">reader errors</div><div class="metric-value ${(m.reader_errors || 0) > 0 ? 'bad' : ''}">${fmt(m.reader_errors || 0)}</div></div>
         <div class="metric" data-tip="When the last CDC row was read from ScyllaDB.\nGreen < 1min, yellow < 5min, red > 5min.\nStale = no new writes to this table."><div class="metric-label">last from ScyllaDB</div><div class="metric-value ${staleClass(m.last_consumed_ms)}">${fmtAgo(m.last_consumed_ms)}</div></div>
         <div class="metric" data-tip="When the last batch was written to ClickHouse.\nGreen < 1min, yellow < 5min, red > 5min.\nStale = flush blocked or no data."><div class="metric-label">last to ClickHouse</div><div class="metric-value ${staleClass(m.last_flushed_ms)}">${fmtAgo(m.last_flushed_ms)}</div></div>
         <div class="metric" data-tip="Time gap between last read (ScyllaDB) and\nlast write (ClickHouse). Shows how far\nbehind writes are from reads."><div class="metric-label">pipeline lag</div><div class="metric-value">${fmtLag(m)}</div></div>

@@ -314,8 +314,6 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		readerWg      sync.WaitGroup                    // tracks all reader goroutines
 		readerCancels = make(map[string]context.CancelFunc) // per-table cancel for stop-on-remove
 		readerMu      sync.Mutex                        // protects readerCancels
-		firstErr      error
-		errOnce       sync.Once
 	)
 
 	// startReader launches a CDC reader goroutine for one table.
@@ -359,25 +357,25 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 		logger.Printf("starting CDC reader for %s", tableName)
 		readerWg.Add(1)
-		go func() {
+		go func(tblName string) {
 			defer readerWg.Done()
 			defer metrics.TablesActive.Dec()
 			defer func() {
 				readerMu.Lock()
-				delete(readerCancels, tableName)
+				delete(readerCancels, tblName)
 				readerMu.Unlock()
 			}()
 			if err := reader.Run(readerCtx); err != nil && readerCtx.Err() == nil {
-				// Only log as error if NOT canceled (canceled = intentional stop)
-				logger.Printf("ERROR reader %s: %v", tableName, err)
-				metrics.ReaderErrorsTotal.WithLabelValues(tableName).Inc()
+				// One broken table does NOT take down the entire pipeline.
+				// Mark as stopped so dashboard shows the error. Restart via SIGHUP or dashboard.
+				logger.Printf("ERROR reader %s: %v — reader stopped (other tables continue, restart via dashboard or SIGHUP)", tblName, err)
+				metrics.ReaderErrorsTotal.WithLabelValues(tblName).Inc()
 				metrics.ErrorsTotal.WithLabelValues("reader", "error").Inc()
-				errOnce.Do(func() {
-					firstErr = fmt.Errorf("reader %s: %w", tableName, err)
-					cancel() // signal all readers + discovery to stop
-				})
+				runningMu.Lock()
+				delete(running, tblName)
+				runningMu.Unlock()
 			}
-		}()
+		}(tableName)
 
 		metrics.TablesActive.Inc()
 		return nil
@@ -527,12 +525,8 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	// Wait for all readers to finish (they run until ctx is cancelled by signal or error).
 	readerWg.Wait()
 
-	if firstErr != nil {
-		logger.Printf("shutting down due to reader error: %v", firstErr)
-	} else {
-		logger.Printf("shutdown complete — all readers stopped cleanly")
-	}
-	return firstErr
+	logger.Printf("shutdown complete — all readers stopped")
+	return nil
 }
 
 // connectScylla creates a gocql.Session for one keyspace.

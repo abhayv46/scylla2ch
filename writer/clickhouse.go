@@ -34,9 +34,10 @@
 //   - Column union: CDC delta rows may have different column sets per row.
 //     flush() scans all rows for column names and builds a union INSERT.
 //
-//   - Exponential retry with poison-row protection: retries on transient errors
-//     (network, timeout), drops batch after exhausting retries to prevent OOM.
-//     Dropped rows are counted in scylla2ch_rows_dropped_total metric.
+//   - Poison row DLQ: Append errors (structural type mismatch) are separated from
+//     Send errors (transient network/timeout). Poison rows are written to dlq/<table>.jsonl
+//     and their checkpoint is advanced (prevents infinite replay loop on restart).
+//     Transient errors use exponential retry; drops batch after exhausting retries.
 //
 //   - Graceful shutdown: Close() signals all writer goroutines via stopCh,
 //     each goroutine drains its channel and does a final flush before exiting.
@@ -45,9 +46,12 @@ package writer
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -370,22 +374,33 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 			continue
 		}
 
-		appendErr := false
-		for _, pr := range rows {
-			vals := make([]interface{}, len(columns))
+		poisonIdx := -1
+		vals := make([]interface{}, len(columns)) // allocate once, reuse across rows
+		for idx, pr := range rows {
 			for i, col := range columns {
 				vals[i] = pr.data[col] // nil/missing → nil, handled by ClickHouse Nullable columns
 			}
 			if err := batch.Append(vals...); err != nil {
 				lastErr = fmt.Errorf("append row: %w", err)
-				appendErr = true
+				poisonIdx = idx
 				break
 			}
 		}
-		if appendErr {
+		if poisonIdx >= 0 {
+			// Structural error — this row will NEVER succeed no matter how many retries.
+			// DLQ it and flush the remaining good rows.
 			batch.Abort()
 			attemptCancel()
-			continue
+			w.dlqRow(table, rows[poisonIdx], lastErr)
+			if rows[poisonIdx].onFlush != nil {
+				rows[poisonIdx].onFlush() // advance checkpoint past the poison row
+			}
+			metrics.RowsDLQ.WithLabelValues(table).Add(1)
+			// Remove poison row and retry with the rest (catches multiple poison rows)
+			remaining := make([]pendingRow, 0, len(rows)-1)
+			remaining = append(remaining, rows[:poisonIdx]...)
+			remaining = append(remaining, rows[poisonIdx+1:]...)
+			return w.flush(table, remaining, ch)
 		}
 
 		if err := batch.Send(); err != nil {
@@ -421,17 +436,18 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 		return nil
 	}
 
-	// Poison row protection: drop rows after exhausting retries to prevent OOM.
-	// IMPORTANT: onFlush callbacks are NOT called — checkpoint stays behind.
-	// On restart, scylla-cdc-go re-reads from the last checkpoint and these rows
-	// will be re-delivered (at-least-once). Same pattern as Kafka DLQ.
-	droppedCount := len(rows)
-	w.logger.Printf("ERROR exhausted retries table=%s rows=%d err=%v — DROPPING (checkpoint NOT advanced, rows will be re-read on restart)", table, droppedCount, lastErr)
+	// Transient error exhaustion: ClickHouse is likely unreachable.
+	// Instead of dropping the batch (data loss), block until ClickHouse recovers.
+	// Like waitForTable() — rows held in bounded buffer, checkpoint frozen, no data loss.
+	// Channel fills up → Add() blocks → CDC reader paused → natural back-pressure.
+	w.logger.Printf("ERROR exhausted retries table=%s rows=%d err=%v — writer PAUSED (waiting for ClickHouse recovery)", table, len(rows), lastErr)
 	metrics.FlushesTotal.WithLabelValues(table, "error").Inc()
-	metrics.RowsDropped.WithLabelValues(table).Add(float64(droppedCount))
 	metrics.ErrorsTotal.WithLabelValues("writer", "critical").Inc()
-	metrics.BufferSize.WithLabelValues(table).Set(float64(len(ch)))
-	return nil
+	if !w.waitForClickHouse(table) {
+		return nil // shutdown
+	}
+	// ClickHouse recovered — retry the same batch
+	return w.flush(table, rows, ch)
 }
 
 // isTableNotFound checks if a ClickHouse error indicates the target table doesn't exist.
@@ -481,6 +497,34 @@ func (w *ClickHouseWriter) waitForTable(table string) bool {
 			}
 		case <-w.stopCh:
 			w.logger.Printf("shutdown while waiting for table=%s — rows in buffer will be re-read from CDC on restart", table)
+			return false
+		}
+	}
+}
+
+// waitForClickHouse blocks until ClickHouse is reachable or shutdown is requested.
+// Like waitForTable() but for connection failures — ping loop with 30s interval.
+// Rows stay in channel buffer, checkpoint frozen, no data loss.
+func (w *ClickHouseWriter) waitForClickHouse(table string) bool {
+	metrics.ClickHouseConnected.Set(0)
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := w.conn.Ping(ctx)
+			cancel()
+			if err == nil {
+				w.logger.Printf("ClickHouse recovered — writer RESUMED for table=%s", table)
+				metrics.ClickHouseConnected.Set(1)
+				return true
+			}
+			w.logger.Printf("ClickHouse still unreachable for table=%s: %v", table, err)
+		case <-w.stopCh:
+			w.logger.Printf("shutdown while waiting for ClickHouse (table=%s) — rows will be re-read from CDC on restart", table)
 			return false
 		}
 	}
@@ -561,6 +605,51 @@ func (w *ClickHouseWriter) TableColumns(ctx context.Context, table string) ([]co
 // Used by multi-keyspace mode to auto-create per-keyspace databases.
 func (w *ClickHouseWriter) EnsureDatabase(ctx context.Context, database string) error {
 	return w.conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", database))
+}
+
+// dlqRow writes a poison row to a DLQ file for investigation.
+// The row failed batch.Append() — structural type mismatch, not transient.
+// File: dlq/<table>.jsonl (one JSON object per line, append-only).
+// DLQ write failure is logged but never blocks the pipeline.
+func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) {
+	dlqDir := "dlq"
+	if err := os.MkdirAll(dlqDir, 0755); err != nil {
+		w.logger.Printf("DLQ mkdir error: %v (poison row lost for table=%s)", err, table)
+		return
+	}
+
+	safeName := strings.ReplaceAll(table, ".", "_")
+	filePath := filepath.Join(dlqDir, safeName+".jsonl")
+
+	entry := map[string]interface{}{
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"table":     table,
+		"error":     appendErr.Error(),
+		"row":       pr.data,
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		w.logger.Printf("DLQ marshal error table=%s: %v (poison row lost)", table, err)
+		return
+	}
+
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		w.logger.Printf("DLQ file error table=%s path=%s: %v (poison row lost)", table, filePath, err)
+		return
+	}
+	defer f.Close()
+
+	n, writeErr := f.Write(data)
+	if writeErr != nil || n != len(data) {
+		w.logger.Printf("DLQ write error table=%s: wrote %d/%d bytes: %v (poison row lost)", table, n, len(data), writeErr)
+		metrics.ErrorsTotal.WithLabelValues("dlq", "error").Inc()
+		return
+	}
+	f.Write([]byte("\n"))
+
+	w.logger.Printf("DLQ poison row table=%s file=%s err=%v", table, filePath, appendErr)
 }
 
 func (w *ClickHouseWriter) Close() error {

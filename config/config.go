@@ -358,6 +358,17 @@ func Load(path string) (*Config, error) {
 		cfg.Tables.DiscoverInterval = 30 * time.Second
 	}
 
+	// Validate dangerous combinations that cause panics or infinite loops
+	if cfg.Batch.Size <= 0 {
+		return nil, fmt.Errorf("batch.size must be > 0 (got %d)", cfg.Batch.Size)
+	}
+	if cfg.Batch.Interval <= 0 {
+		return nil, fmt.Errorf("batch.interval must be > 0")
+	}
+	if cfg.Health.Port != 0 && cfg.Metrics.Port != 0 && cfg.Health.Port == cfg.Metrics.Port {
+		return nil, fmt.Errorf("health.port (%d) and metrics.port (%d) cannot be the same", cfg.Health.Port, cfg.Metrics.Port)
+	}
+
 	// Validate required fields
 	if len(cfg.Scylla.Hosts) == 0 {
 		return nil, fmt.Errorf("scylla.hosts is required")

@@ -80,8 +80,10 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 	changeTime := change.Time // capture for onFlush closure
 	onFlush := func() { c.reporter.Update(changeTime) }
 
-	// Delta mode — works with all tables (no postimage required).
-	// Delta rows contain the columns that were actually written/updated.
+	// Delta mode — only changed columns per CDC row.
+	// Works for INSERT-only tables (all columns present). For tables with UPDATEs,
+	// unchanged columns become NULL after ReplacingMergeTree merge — accepted trade-off
+	// (postimage mode would fix this but adds extra read per write on ScyllaDB).
 	for _, row := range change.Delta {
 		op := row.GetOperation()
 		// Skip ALL delete types — ClickHouse ReplacingMergeTree handles dedup, not deletes.

@@ -458,7 +458,27 @@ func NewMux(s *State) http.Handler {
 							perTable[tbl]["flushes_error"] = m.GetCounter().GetValue()
 						}
 					}
-				case "scylla2ch_last_consumed_timestamp_ms":
+				case "scylla2ch_rows_dlq_total":
+				if tbl != "" {
+					ensureTable(perTable, tbl)
+					perTable[tbl]["rows_dlq"] = m.GetCounter().GetValue()
+				}
+			case "scylla2ch_retries_total":
+				if tbl != "" {
+					ensureTable(perTable, tbl)
+					perTable[tbl]["retries"] = m.GetCounter().GetValue()
+				}
+			case "scylla2ch_reader_errors_total":
+				if tbl != "" {
+					ensureTable(perTable, tbl)
+					perTable[tbl]["reader_errors"] = m.GetCounter().GetValue()
+				}
+			case "scylla2ch_deletes_skipped_total":
+				if tbl != "" {
+					ensureTable(perTable, tbl)
+					perTable[tbl]["deletes_skipped"] = m.GetCounter().GetValue()
+				}
+			case "scylla2ch_last_consumed_timestamp_ms":
 					if tbl != "" {
 						ensureTable(perTable, tbl)
 						perTable[tbl]["last_consumed_ms"] = m.GetGauge().GetValue()
@@ -468,6 +488,14 @@ func NewMux(s *State) http.Handler {
 						ensureTable(perTable, tbl)
 						perTable[tbl]["last_flushed_ms"] = m.GetGauge().GetValue()
 					}
+				case "scylla2ch_errors_total":
+					component := labelValue(m, "component")
+					severity := labelValue(m, "severity")
+					if component != "" {
+						key := "errors_" + component + "_" + severity
+						ensureTable(perTable, "_global")
+						perTable["_global"][key] = m.GetCounter().GetValue()
+					}
 				case "scylla2ch_consumers_active":
 					consumersActive = m.GetGauge().GetValue()
 				case "scylla2ch_tables_active":
@@ -476,8 +504,13 @@ func NewMux(s *State) http.Handler {
 			}
 		}
 
+		// Extract global errors into separate field
+		globalErrors := perTable["_global"]
+		delete(perTable, "_global")
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"tables": perTable,
+			"errors": globalErrors,
 			"totals": map[string]interface{}{
 				"rows_consumed":    totalConsumed,
 				"rows_flushed":     totalFlushed,
@@ -718,7 +751,7 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	if !chFound {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"ok":    false,
-			"error": fmt.Sprintf("ClickHouse table '%s' does not exist — create it first", chFQN),
+			"error": fmt.Sprintf("ClickHouse table '%s' does not exist — create it first using the Create Table button", chFQN),
 		})
 		return
 	}

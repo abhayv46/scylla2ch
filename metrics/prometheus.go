@@ -1,11 +1,12 @@
 // Package metrics defines all Prometheus metrics and the metrics HTTP server.
 //
-// Metric categories (21 metrics total):
+// Metric categories (22 metrics total):
 //
-//   Throughput (3):
+//   Throughput (4):
 //     scylla2ch_rows_consumed_total{table}   — CDC rows read from ScyllaDB
 //     scylla2ch_rows_flushed_total{table}    — rows written to ClickHouse
 //     scylla2ch_rows_dropped_total{table}    — rows lost after retry exhaustion (ALERT)
+//     scylla2ch_rows_dlq_total{table}        — poison rows sent to DLQ file (ALERT)
 //
 //   Flush operations (3):
 //     scylla2ch_flushes_total{table,status}     — flush attempts (ok/error)
@@ -87,6 +88,14 @@ var (
 		prometheus.CounterOpts{
 			Name: "scylla2ch_rows_dropped_total",
 			Help: "Total rows dropped after exhausting retries (data loss), by table",
+		},
+		[]string{"table"},
+	)
+
+	RowsDLQ = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scylla2ch_rows_dlq_total",
+			Help: "Total poison rows sent to DLQ (structural Append errors), by table",
 		},
 		[]string{"table"},
 	)
@@ -250,6 +259,28 @@ var (
 		[]string{"table"},
 	)
 
+	// --- Runtime (goroutine/memory leak detection) ---
+
+	GoroutineCount = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "scylla2ch_goroutines",
+			Help: "Current number of goroutines (detect leaks)",
+		},
+		func() float64 { return float64(runtime.NumGoroutine()) },
+	)
+
+	HeapAllocBytes = prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "scylla2ch_heap_alloc_bytes",
+			Help: "Current heap allocation in bytes (detect memory growth)",
+		},
+		func() float64 {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			return float64(m.HeapAlloc)
+		},
+	)
+
 	// --- Info ---
 
 	BuildInfo = prometheus.NewGaugeVec(
@@ -266,6 +297,7 @@ func init() {
 		RowsConsumed,
 		RowsFlushed,
 		RowsDropped,
+		RowsDLQ,
 		FlushesTotal,
 		FlushLatency,
 		FlushBatchSize,
@@ -284,6 +316,8 @@ func init() {
 		UptimeSeconds,
 		LastConsumedTimestampMs,
 		LastFlushedTimestampMs,
+		GoroutineCount,
+		HeapAllocBytes,
 		BuildInfo,
 	)
 
