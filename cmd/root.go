@@ -10,6 +10,11 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +43,31 @@ Features:
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "/etc/scylla2ch/config.yaml", "config file path")
+
+	// Auto-load .env.prod from the config file's directory, then from working directory.
+	// Environment variables from .env.prod are set BEFORE config.Load() expands ${VAR}.
+	// Existing env vars (e.g. from systemd EnvironmentFile) take precedence — godotenv
+	// does NOT overwrite already-set variables.
+	loadEnvFile()
+}
+
+func loadEnvFile() {
+	// Try config directory first (e.g. /etc/scylla2ch/.env.prod)
+	cfgDir := filepath.Dir(cfgFile)
+	candidates := []string{
+		filepath.Join(cfgDir, ".env.prod"),
+		filepath.Join(cfgDir, ".env"),
+		".env.prod",
+		".env",
+	}
+	for _, f := range candidates {
+		if _, err := os.Stat(f); err == nil {
+			if err := godotenv.Load(f); err == nil {
+				fmt.Fprintf(os.Stderr, "loaded env from %s\n", f)
+				return
+			}
+		}
+	}
 }
 
 func Execute() error {
