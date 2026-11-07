@@ -21,6 +21,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 
 	scyllacdc "github.com/scylladb/scylla-cdc-go"
 
@@ -36,6 +37,7 @@ type Factory struct {
 	writer   *writer.ClickHouseWriter
 	logger   *log.Logger
 	chDBMap  map[string]string // ScyllaDB keyspace → ClickHouse database name
+	chDBMu   sync.RWMutex     // protects chDBMap for concurrent access
 }
 
 func NewFactory(cfg *config.Config, w *writer.ClickHouseWriter, l *log.Logger) *Factory {
@@ -44,8 +46,11 @@ func NewFactory(cfg *config.Config, w *writer.ClickHouseWriter, l *log.Logger) *
 
 // SetKeyspaceDB maps a ScyllaDB keyspace to a ClickHouse database name.
 // Used by multi-keyspace mode to route each keyspace's data to the right CH database.
+// Thread-safe: called from main goroutine before readers start, or from SIGHUP reload.
 func (f *Factory) SetKeyspaceDB(keyspace, chDB string) {
+	f.chDBMu.Lock()
 	f.chDBMap[keyspace] = chDB
+	f.chDBMu.Unlock()
 }
 
 func (f *Factory) CreateChangeConsumer(
@@ -74,7 +79,9 @@ func (f *Factory) CreateChangeConsumer(
 	}
 
 	// Look up ClickHouse database for this keyspace (multi-keyspace support)
+	f.chDBMu.RLock()
 	chDB := f.chDBMap[keyspace]
+	f.chDBMu.RUnlock()
 	if chDB == "" {
 		chDB = f.cfg.ClickHouse.Database // fallback for single-keyspace
 	}

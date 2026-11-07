@@ -58,9 +58,12 @@ type State struct {
 	Version    string
 	Logger     *log.Logger
 
-	// For pre-flight validation when adding tables
+	// For pre-flight validation when adding tables.
+	// SessionMap and CHDBMap are written by SIGHUP reload goroutine and read by HTTP handlers.
+	// SessionMu protects both maps from concurrent access.
 	SessionMap map[string]*gocql.Session // keyspace → ScyllaDB session
 	CHDBMap    map[string]string         // keyspace → ClickHouse database
+	SessionMu  *sync.RWMutex            // protects SessionMap and CHDBMap
 	CHChecker  CHTableChecker            // checks ClickHouse table existence
 
 	// StopTable cancels the CDC reader for a table and removes it from Running.
@@ -84,6 +87,11 @@ var (
 	loginAttempts   = make(map[string][]time.Time)
 	loginAttemptsMu sync.Mutex
 )
+
+// configFileMu serializes writes to the config YAML file.
+// modifyConfigTables and modifyConfigBatch both read-modify-write the same file;
+// without this mutex, concurrent dashboard requests can corrupt the YAML.
+var configFileMu sync.Mutex
 
 const sessionTTL = 24 * time.Hour
 const sessionCookie = "scylla2ch_session"
@@ -223,10 +231,9 @@ func NewMux(s *State) http.Handler {
 			return
 		}
 
+		// Use RemoteAddr directly — do NOT trust X-Forwarded-For (spoofable, bypasses rate limit).
+		// Dashboard is accessed via SSM port forwarding or direct connection, not behind a proxy.
 		clientIP := r.RemoteAddr
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			clientIP = strings.SplitN(fwd, ",", 2)[0]
-		}
 
 		if isRateLimited(clientIP) {
 			writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{
@@ -558,6 +565,9 @@ func NewMux(s *State) http.Handler {
 		ks, tbl := parts[0], parts[1]
 
 		var anySession *gocql.Session
+		if s.SessionMu != nil {
+			s.SessionMu.RLock()
+		}
 		if s.SessionMap != nil {
 			for _, sess := range s.SessionMap {
 				if sess != nil {
@@ -565,6 +575,9 @@ func NewMux(s *State) http.Handler {
 					break
 				}
 			}
+		}
+		if s.SessionMu != nil {
+			s.SessionMu.RUnlock()
 		}
 		if anySession == nil || s.CHChecker == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
@@ -684,6 +697,9 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	// system_schema.tables is cluster-wide — ANY session can query ANY keyspace's tables.
 	// So we grab the first available session and use it for all CDC checks.
 	var anySession *gocql.Session
+	if s.SessionMu != nil {
+		s.SessionMu.RLock()
+	}
 	if s.SessionMap != nil {
 		for _, sess := range s.SessionMap {
 			if sess != nil {
@@ -691,6 +707,9 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 				break
 			}
 		}
+	}
+	if s.SessionMu != nil {
+		s.SessionMu.RUnlock()
 	}
 
 	cdcFound := false
@@ -779,7 +798,13 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 			chFQN = chTarget // already has database.table, use as-is
 		} else {
 			// Try CHDBMap first, fall back to keyspace name as ClickHouse database
+			if s.SessionMu != nil {
+				s.SessionMu.RLock()
+			}
 			chDB := s.CHDBMap[ks]
+			if s.SessionMu != nil {
+				s.SessionMu.RUnlock()
+			}
 			if chDB == "" {
 				chDB = ks // e.g. frnddit keyspace → frnddit database
 			}
@@ -932,6 +957,9 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 // routeTarget is the ClickHouse table name when it differs from the ScyllaDB table name (empty = same name).
 // keyspace is the ScyllaDB keyspace for this table (stored per-table to avoid cross-product).
 func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string, keyspace string) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+
 	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -1111,6 +1139,9 @@ func addKeyspaceToConfig(root *yaml.Node, keyspace string) {
 
 // modifyConfigBatch updates batch.size and/or batch.interval in the config YAML file.
 func modifyConfigBatch(cfgFile string, batchSize *int, batchInterval *string) error {
+	configFileMu.Lock()
+	defer configFileMu.Unlock()
+
 	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)

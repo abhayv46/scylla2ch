@@ -296,6 +296,9 @@ function esc(s) { // prevent XSS — escape HTML entities in dynamic values
   d.textContent = s;
   return d.innerHTML;
 }
+function escAttr(s) { // escape for use inside HTML attribute values (onclick, data-*)
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
 function fmt(n) {
   if (n === undefined || n === null) return '-';
@@ -377,7 +380,7 @@ function render() {
   if (stoppedTables.length > 0) errors.push('Stopped: ' + stoppedTables.join(', '));
   const banner = $('error-banner');
   if (errors.length > 0) {
-    banner.innerHTML = errors.join(' · ');
+    banner.textContent = errors.join(' · ');
     banner.style.display = 'block';
   } else {
     banner.style.display = 'none';
@@ -430,8 +433,8 @@ function render() {
           <span class="status-badge isolated" data-tip="Each table runs its own CDC reader.\nIf this table errors, other tables\ncontinue streaming independently.">isolated</span>
         </span>
         <span style="display:flex;align-items:center;gap:0.5rem">
-          <button class="remove-btn" style="color:var(--blue);border-color:var(--border)" onclick="schemaCheck('${esc(t.fqn)}')">schema</button>
-          ${userRole === 'owner' ? `<button class="remove-btn" onclick="removeTable('${t.name}')">remove</button>` : ''}
+          <button class="remove-btn" style="color:var(--blue);border-color:var(--border)" data-schema="${escAttr(t.fqn)}">schema</button>
+          ${userRole === 'owner' ? `<button class="remove-btn" data-remove="${escAttr(t.name)}">remove</button>` : ''}
         </span>
       </div>
       <div class="table-metrics">
@@ -454,6 +457,14 @@ function render() {
       </div>
     </div>`;
   }).join('');
+
+  // Bind click handlers via data attributes (prevents XSS from table names in onclick)
+  grid.querySelectorAll('[data-schema]').forEach(btn => {
+    btn.addEventListener('click', () => schemaCheck(btn.dataset.schema));
+  });
+  grid.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', () => removeTable(btn.dataset.remove));
+  });
 }
 
 // --- Table management ---

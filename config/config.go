@@ -22,6 +22,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,7 +78,16 @@ type ScyllaConfig struct {
 // If both keyspace and keyspaces are set, keyspaces wins.
 func (s *ScyllaConfig) AllKeyspaces() []string {
 	if len(s.Keyspaces) > 0 {
-		return s.Keyspaces
+		// Deduplicate — config may list the same keyspace twice, or keyspace + keyspaces overlap.
+		seen := make(map[string]bool, len(s.Keyspaces))
+		out := make([]string, 0, len(s.Keyspaces))
+		for _, ks := range s.Keyspaces {
+			if !seen[ks] {
+				seen[ks] = true
+				out = append(out, ks)
+			}
+		}
+		return out
 	}
 	if s.Keyspace != "" {
 		return []string{s.Keyspace}
@@ -164,7 +174,17 @@ func (r *RouteConfig) Matches(row map[string]interface{}) bool {
 		return true
 	}
 
-	if strings.Contains(filter, " AND ") {
+	hasAND := strings.Contains(filter, " AND ")
+	hasOR := strings.Contains(filter, " OR ")
+
+	// Mixed AND/OR is ambiguous (no operator precedence) — reject at match time.
+	// Config validation catches this at load, but guard here too for safety.
+	if hasAND && hasOR {
+		log.Printf("ERROR route filter has mixed AND/OR (ambiguous): %q — treating as no-match", filter)
+		return false
+	}
+
+	if hasAND {
 		parts := strings.Split(filter, " AND ")
 		for _, part := range parts {
 			if !evalCondition(strings.TrimSpace(part), row) {
@@ -174,7 +194,7 @@ func (r *RouteConfig) Matches(row map[string]interface{}) bool {
 		return true
 	}
 
-	if strings.Contains(filter, " OR ") {
+	if hasOR {
 		parts := strings.Split(filter, " OR ")
 		for _, part := range parts {
 			if evalCondition(strings.TrimSpace(part), row) {
@@ -367,6 +387,16 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Health.Port != 0 && cfg.Metrics.Port != 0 && cfg.Health.Port == cfg.Metrics.Port {
 		return nil, fmt.Errorf("health.port (%d) and metrics.port (%d) cannot be the same", cfg.Health.Port, cfg.Metrics.Port)
+	}
+
+	// Validate route filters — mixed AND/OR is ambiguous (no operator precedence)
+	for i := range cfg.Tables.Explicit {
+		for j := range cfg.Tables.Explicit[i].Routes {
+			f := cfg.Tables.Explicit[i].Routes[j].Filter
+			if strings.Contains(f, " AND ") && strings.Contains(f, " OR ") {
+				return nil, fmt.Errorf("table %s route %d: mixed AND/OR in filter %q is ambiguous — use only AND or only OR", cfg.Tables.Explicit[i].Name, j, f)
+			}
+		}
 	}
 
 	// Validate required fields

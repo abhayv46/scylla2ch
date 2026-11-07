@@ -131,6 +131,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 	iter := session.Query(query).
 		PageSize(5000).
 		Iter()
+	defer iter.Close()
 
 	columns := iter.Columns()
 	if len(columns) == 0 {
@@ -208,12 +209,15 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 			matched := false
 			for _, route := range tc.Routes {
 				if route.Matches(row) {
-					filtered := make(map[string]interface{})
+					filtered := make(map[string]interface{}, len(route.Columns)+2)
 					for _, col := range route.Columns {
 						if v, ok := row[col]; ok {
 							filtered[col] = v
 						}
 					}
+					// Always include CDC metadata — required for ReplacingMergeTree dedup
+					filtered["_cdc_operation"] = row["_cdc_operation"]
+					filtered["_cdc_ts"] = row["_cdc_ts"]
 					chWriter.Add(chDB+"."+route.Target, filtered)
 					matched = true
 					break

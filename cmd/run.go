@@ -95,14 +95,22 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}
 	defer upg.Stop()
 
-	// SIGUSR2 triggers zero-downtime upgrade
+	// SIGUSR2 triggers zero-downtime upgrade.
+	// Uses a done channel to stop the goroutine on shutdown (prevents goroutine leak).
+	upgDone := make(chan struct{})
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGUSR2)
-		for range sig {
-			logger.Printf("SIGUSR2 received — starting zero-downtime binary upgrade")
-			if err := upg.Upgrade(); err != nil {
-				logger.Printf("upgrade error: %v", err)
+		defer signal.Stop(sig)
+		for {
+			select {
+			case <-sig:
+				logger.Printf("SIGUSR2 received — starting zero-downtime binary upgrade")
+				if err := upg.Upgrade(); err != nil {
+					logger.Printf("upgrade error: %v", err)
+				}
+			case <-upgDone:
+				return
 			}
 		}
 	}()
@@ -153,8 +161,9 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	// Start dashboard early — serves UI even when databases are unreachable.
 	//    This lets operators see config, add/remove tables, and diagnose connectivity.
 	var (
-		running   = make(map[string]bool)
-		runningMu sync.Mutex
+		running    = make(map[string]bool)
+		runningMu  sync.Mutex
+		sessionMu  sync.RWMutex // protects sessionMap and chDBMap from concurrent dashboard reads
 	)
 	startTime := time.Now()
 	dashState := &dashboard.State{
@@ -167,6 +176,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		Logger:     logger,
 		SessionMap: nil,
 		CHDBMap:    nil,
+		SessionMu:  &sessionMu,
 		CHChecker:  nil,
 	}
 	earlyHealthServer := &http.Server{
@@ -203,9 +213,14 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 		sessions = append(sessions, ksState{keyspace: ks, session: sess, chDB: chDB})
 	}
+	// dynamicSessions tracks sessions created during SIGHUP reload for cleanup.
+	var dynamicSessions []*gocql.Session
 	defer func() {
 		for _, s := range sessions {
 			s.session.Close()
+		}
+		for _, sess := range dynamicSessions {
+			sess.Close()
 		}
 		metrics.ScyllaConnected.Set(0)
 	}()
@@ -318,9 +333,11 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	// 6. Graceful shutdown: SIGINT/SIGTERM (manual stop) or tableflip exit (upgrade handoff)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer close(upgDone) // stop SIGUSR2 goroutine on exit
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sig)
 		select {
 		case s := <-sig:
 			logger.Printf("received %v — shutting down", s)
@@ -485,13 +502,14 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	readerWg.Add(1)
 	go func() {
 		defer readerWg.Done()
+		defer signal.Stop(sighupCh)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-sighupCh:
-				reloadConfig(cfgFile, cfg, disc, chWriter, sessionMap, chDBMap,
-					&running, &runningMu, startReader, stopTable, ctx, logger)
+				reloadConfig(cfgFile, cfg, disc, chWriter, factory, sessionMap, chDBMap,
+					&dynamicSessions, &sessionMu, &running, &runningMu, startReader, stopTable, ctx, logger)
 			}
 		}
 	}()
@@ -511,7 +529,16 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					for _, s := range sessions {
+					// Snapshot sessionMap under lock — picks up keyspaces added by SIGHUP reload.
+					// The old `sessions` slice was captured at startup and went stale after reload.
+					sessionMu.RLock()
+					snap := make([]ksState, 0, len(sessionMap))
+					for ks, sess := range sessionMap {
+						snap = append(snap, ksState{keyspace: ks, session: sess, chDB: chDBMap[ks]})
+					}
+					sessionMu.RUnlock()
+
+					for _, s := range snap {
 						discovered, err := disc.ScanForCDCTables(s.session, s.keyspace)
 						if err != nil {
 							logger.Printf("WARN hot-reload scan keyspace=%s: %v", s.keyspace, err)
@@ -542,7 +569,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 								}
 							} else {
 								// Verify ClickHouse table exists before starting reader
-								checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
+								checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 								exists, chErr := chWriter.TableExists(checkCtx, fmt.Sprintf("%s.%s", s.chDB, t))
 								checkCancel()
 								if chErr != nil {
@@ -766,8 +793,11 @@ func reloadConfig(
 	oldCfg *config.Config,
 	disc *converter.Discoverer,
 	chWriter *writer.ClickHouseWriter,
+	factory *consumer.Factory,
 	sessionMap map[string]*gocql.Session,
 	chDBMap map[string]string,
+	dynamicSessions *[]*gocql.Session,
+	sessionMu *sync.RWMutex,
 	running *map[string]bool,
 	runningMu *sync.Mutex,
 	startReader func(sess *gocql.Session, keyspace, tableName string) error,
@@ -807,7 +837,10 @@ func reloadConfig(
 	// Dynamically create sessions for new keyspaces (no restart needed).
 	// Uses UniqueKeyspaces() which includes both configured keyspaces AND per-table keyspaces.
 	for _, ks := range newCfg.UniqueKeyspaces() {
-		if sessionMap[ks] == nil {
+		sessionMu.RLock()
+		exists := sessionMap[ks] != nil
+		sessionMu.RUnlock()
+		if !exists {
 			logger.Printf("SIGHUP reload: new keyspace %q — creating session on-the-fly", ks)
 			sess, err := connectScylla(newCfg, ks, logger)
 			if err != nil {
@@ -815,12 +848,17 @@ func reloadConfig(
 				metrics.ErrorsTotal.WithLabelValues("reload", "error").Inc()
 				continue
 			}
-			sessionMap[ks] = sess
+			*dynamicSessions = append(*dynamicSessions, sess)
 			// ClickHouse database = keyspace name for dynamically-added keyspaces
 			chDB := ks
+			// Lock sessionMap/chDBMap for writes — dashboard HTTP handlers read them concurrently
+			sessionMu.Lock()
+			sessionMap[ks] = sess
 			chDBMap[ks] = chDB
-			// Ensure ClickHouse database exists
-			ensureCtx, ensureCancel := context.WithTimeout(ctx, 10*time.Second)
+			sessionMu.Unlock()
+			factory.SetKeyspaceDB(ks, chDB)
+			// Use context.Background() to avoid silent failure if ctx is already cancelled during shutdown.
+			ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if dbErr := chWriter.EnsureDatabase(ensureCtx, chDB); dbErr != nil {
 				logger.Printf("WARN SIGHUP reload: auto-create database %s: %v", chDB, dbErr)
 			}
@@ -852,7 +890,9 @@ func reloadConfig(
 		ks := fqn[:dotIdx]
 		tbl := fqn[dotIdx+1:]
 
+		sessionMu.RLock()
 		sess := sessionMap[ks]
+		sessionMu.RUnlock()
 		if sess == nil {
 			logger.Printf("WARN SIGHUP reload: no session for keyspace %s (table %s) — requires restart", ks, fqn)
 			runningMu.Lock()
@@ -861,7 +901,9 @@ func reloadConfig(
 			continue
 		}
 
+		sessionMu.RLock()
 		chDB := chDBMap[ks]
+		sessionMu.RUnlock()
 
 		// Auto-create ClickHouse table if enabled
 		if newCfg.Tables.AutoCreate {
@@ -870,7 +912,7 @@ func reloadConfig(
 			}
 		} else {
 			// Verify ClickHouse table exists
-			checkCtx, checkCancel := context.WithTimeout(ctx, 10*time.Second)
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			exists, chErr := chWriter.TableExists(checkCtx, fmt.Sprintf("%s.%s", chDB, tbl))
 			checkCancel()
 			if chErr != nil {

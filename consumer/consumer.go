@@ -212,10 +212,11 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 		}
 	case *int:
 		// CQL int → Go *int (NOT *int32 in scylla-cdc-go)
-		// Guard against overflow: Go int is 64-bit on 64-bit platforms
+		// Always return int32 — CQL int is 32-bit, mixed types in one batch cause poison rows.
+		// Log warning on overflow (indicates corrupt CDC data, not a real CQL int).
 		if v != nil {
 			if *v > math.MaxInt32 || *v < math.MinInt32 {
-				return int64(*v) // promote to int64 to prevent silent truncation
+				log.Printf("WARNING column=%s int overflow value=%d, truncating to int32 (CQL int is 32-bit)", name, *v)
 			}
 			return int32(*v)
 		}
@@ -301,6 +302,7 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 	case []string:
 		return v
 	case []int:
+		// CQL list<int> → always int32 to avoid mixed-type batch failures.
 		out := make([]int32, len(v))
 		for i, x := range v {
 			out[i] = int32(x)
@@ -390,7 +392,7 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 		return v
 	case int:
 		if v > math.MaxInt32 || v < math.MinInt32 {
-			return int64(v)
+			log.Printf("WARNING column=%s int overflow value=%d, truncating to int32", name, v)
 		}
 		return int32(v)
 	case int16:
@@ -438,11 +440,19 @@ func (c *Consumer) routeToTargets(values map[string]interface{}, tc *config.Tabl
 			// If columns not specified, pass all columns (1:1 rename / simple mapping)
 			row := values
 			if len(route.Columns) > 0 {
-				row = make(map[string]interface{}, len(route.Columns))
+				row = make(map[string]interface{}, len(route.Columns)+2)
 				for _, col := range route.Columns {
 					if v, ok := values[col]; ok {
 						row[col] = v
 					}
+				}
+				// Always include CDC metadata — required for ReplacingMergeTree dedup.
+				// Users won't list _cdc_ts in route Columns (it's synthetic, not a ScyllaDB column).
+				if v, ok := values["_cdc_ts"]; ok {
+					row["_cdc_ts"] = v
+				}
+				if v, ok := values["_cdc_operation"]; ok {
+					row["_cdc_operation"] = v
 				}
 			}
 			// If target is fully-qualified (has dot), use as-is; otherwise prepend chDB

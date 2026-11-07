@@ -193,9 +193,13 @@ func (w *ClickHouseWriter) Add(table string, row map[string]interface{}, onFlush
 	if len(onFlush) > 0 {
 		pr.onFlush = onFlush[0]
 	}
+	// Block until channel accepts or shutdown. This is intentional back-pressure:
+	// when ClickHouse is slow/down, channels fill → Add blocks → CDC reader pauses.
+	// No timeout: rows are NEVER dropped. waitForClickHouse() in flush() handles
+	// recovery. stopCh prevents deadlock during shutdown.
 	select {
 	case ch <- pr: // blocks when full = natural back-pressure
-	case <-w.stopCh: // writer shutting down, drop the row
+	case <-w.stopCh: // writer shutting down, drop the row (checkpoint not advanced)
 	}
 }
 
@@ -281,10 +285,17 @@ func (w *ClickHouseWriter) tableWriter(table string, ch chan pendingRow) {
 				}
 			}
 			if len(buf) > 0 {
-				err := w.flush(table, buf, ch)
-				if err == errTableNotFound {
-					w.logger.Printf("table=%s not found during shutdown — %d rows not flushed (checkpoint frozen, will re-read from CDC on restart)", table, len(buf))
-				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							w.logger.Printf("PANIC in flush during shutdown for table=%s: %v (%d rows lost)", table, r, len(buf))
+						}
+					}()
+					err := w.flush(table, buf, ch)
+					if err == errTableNotFound {
+						w.logger.Printf("table=%s not found during shutdown — %d rows not flushed (checkpoint frozen, will re-read from CDC on restart)", table, len(buf))
+					}
+				}()
 			}
 			w.logger.Printf("writer goroutine stopped for table=%s", table)
 			return
@@ -304,26 +315,15 @@ func (w *ClickHouseWriter) tableWriter(table string, ch chan pendingRow) {
 // Returns errTableNotFound if the ClickHouse table doesn't exist — caller should
 // wait for the table and retry the SAME batch (don't clear buffer, don't drop).
 // Returns nil on success OR on drop (poison row protection for non-table errors).
+//
+// Poison row handling is iterative (not recursive) to prevent stack overflow
+// when a batch contains many bad rows.
 func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendingRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
 	start := time.Now()
-
-	// Column union: scan ALL rows for column names.
-	// CDC delta rows may have different column sets per row.
-	colSet := make(map[string]struct{})
-	for _, pr := range rows {
-		for k := range pr.data {
-			colSet[k] = struct{}{}
-		}
-	}
-	columns := make([]string, 0, len(colSet))
-	for k := range colSet {
-		columns = append(columns, k)
-	}
-	sort.Strings(columns)
 
 	// Parse qualified name: "database.table" → INSERT INTO `database`.`table`
 	// Falls back to w.db for unqualified names (backward compat with single-keyspace)
@@ -333,121 +333,144 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 		tablePart = table[idx+1:]
 	}
 
-	// Build INSERT with explicit column names (CDC delta only has changed columns).
-	// Backtick-quote column names for safety — ScyllaDB enforces valid identifiers,
-	// but quoting is defensive best practice (matches DDL in schema.go).
-	quoted := make([]string, len(columns))
-	for i, c := range columns {
-		quoted[i] = "`" + c + "`"
-	}
-	query := fmt.Sprintf("INSERT INTO `%s`.`%s` (%s)", db, tablePart, strings.Join(quoted, ", "))
-
-	var lastErr error
-	for attempt := 0; attempt <= w.cfg.RetryMax; attempt++ {
-		if attempt > 0 {
-			// Exponential backoff: 500ms, 1s, 2s, 4s...
-			backoff := w.cfg.RetryBackoff * time.Duration(1<<uint(attempt-1))
-			// Use NewTimer instead of time.After to avoid timer leak when stopCh wins.
-			timer := time.NewTimer(backoff)
-			select {
-			case <-timer.C:
-			case <-w.stopCh:
-				timer.Stop()
-				w.logger.Printf("flush cancelled during shutdown table=%s rows=%d", table, len(rows))
-				return nil
-			}
-			timer.Stop() // stop if timer already fired (no-op but safe)
-			w.logger.Printf("RETRY table=%s attempt=%d/%d backoff=%v", table, attempt, w.cfg.RetryMax, backoff)
+	// Poison row loop: iteratively remove bad rows and re-flush good ones.
+	// Replaces the old recursive w.flush() call that could stack-overflow with 500+ poison rows.
+	for {
+		if len(rows) == 0 {
+			return nil
 		}
 
-		// Fresh context per retry — prevents a slow first attempt from starving later retries.
-		attemptCtx, attemptCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		batch, err := w.conn.PrepareBatch(attemptCtx, query, driver.WithReleaseConnection())
-		if err != nil {
-			// Table not found → don't waste retries, return immediately for caller to wait
-			if isTableNotFound(err) {
-				attemptCancel()
-				return errTableNotFound
-			}
-			lastErr = fmt.Errorf("prepare: %w", err)
-			attemptCancel()
-			continue
-		}
-
-		poisonIdx := -1
-		vals := make([]interface{}, len(columns)) // allocate once, reuse across rows
-		for idx, pr := range rows {
-			for i, col := range columns {
-				vals[i] = pr.data[col] // nil/missing → nil, handled by ClickHouse Nullable columns
-			}
-			if err := batch.Append(vals...); err != nil {
-				lastErr = fmt.Errorf("append row: %w", err)
-				poisonIdx = idx
-				break
-			}
-		}
-		if poisonIdx >= 0 {
-			// Structural error — this row will NEVER succeed no matter how many retries.
-			// DLQ it and flush the remaining good rows.
-			batch.Abort()
-			attemptCancel()
-			w.dlqRow(table, rows[poisonIdx], lastErr)
-			if rows[poisonIdx].onFlush != nil {
-				rows[poisonIdx].onFlush() // advance checkpoint past the poison row
-			}
-			metrics.RowsDLQ.WithLabelValues(table).Add(1)
-			// Remove poison row and retry with the rest (catches multiple poison rows)
-			remaining := make([]pendingRow, 0, len(rows)-1)
-			remaining = append(remaining, rows[:poisonIdx]...)
-			remaining = append(remaining, rows[poisonIdx+1:]...)
-			return w.flush(table, remaining, ch)
-		}
-
-		if err := batch.Send(); err != nil {
-			if isTableNotFound(err) {
-				attemptCancel()
-				return errTableNotFound
-			}
-			lastErr = fmt.Errorf("send: %w", err)
-			attemptCancel()
-			continue
-		}
-		attemptCancel()
-
-		// Success — call ack callbacks (at-least-once: checkpoint advances only now)
+		// Column union: scan ALL rows for column names.
+		// CDC delta rows may have different column sets per row.
+		colSet := make(map[string]struct{})
 		for _, pr := range rows {
-			if pr.onFlush != nil {
-				pr.onFlush()
+			for k := range pr.data {
+				colSet[k] = struct{}{}
 			}
 		}
-
-		flushedCount := len(rows)
-		elapsed := time.Since(start).Seconds()
-		w.logger.Printf("flushed table=%s rows=%d duration=%.3fs", table, flushedCount, elapsed)
-		metrics.RowsFlushed.WithLabelValues(table).Add(float64(flushedCount))
-		metrics.LastFlushedTimestampMs.WithLabelValues(table).Set(float64(time.Now().UnixMilli()))
-		metrics.FlushesTotal.WithLabelValues(table, "ok").Inc()
-		metrics.FlushLatency.WithLabelValues(table).Observe(elapsed)
-		metrics.FlushBatchSize.WithLabelValues(table).Observe(float64(flushedCount))
-		metrics.BufferSize.WithLabelValues(table).Set(float64(len(ch)))
-		if attempt > 0 {
-			metrics.RetriesTotal.WithLabelValues(table).Add(float64(attempt))
+		columns := make([]string, 0, len(colSet))
+		for k := range colSet {
+			columns = append(columns, k)
 		}
-		return nil
-	}
+		sort.Strings(columns)
 
-	// Transient error exhaustion: ClickHouse is likely unreachable.
-	// Instead of dropping the batch (data loss), block until ClickHouse recovers.
-	// Like waitForTable() — rows held in bounded buffer, checkpoint frozen, no data loss.
-	// Channel fills up → Add() blocks → CDC reader paused → natural back-pressure.
-	w.logger.Printf("ERROR exhausted retries table=%s rows=%d err=%v — writer PAUSED (waiting for ClickHouse recovery)", table, len(rows), lastErr)
-	metrics.FlushesTotal.WithLabelValues(table, "error").Inc()
-	metrics.ErrorsTotal.WithLabelValues("writer", "critical").Inc()
-	if !w.waitForClickHouse(table) {
-		return nil // shutdown
+		// Build INSERT with explicit column names (CDC delta only has changed columns).
+		quoted := make([]string, len(columns))
+		for i, c := range columns {
+			quoted[i] = "`" + c + "`"
+		}
+		query := fmt.Sprintf("INSERT INTO `%s`.`%s` (%s)", db, tablePart, strings.Join(quoted, ", "))
+
+		var lastErr error
+		flushed := false
+
+		for attempt := 0; attempt <= w.cfg.RetryMax; attempt++ {
+			if attempt > 0 {
+				backoff := w.cfg.RetryBackoff * time.Duration(1<<uint(attempt-1))
+				timer := time.NewTimer(backoff)
+				select {
+				case <-timer.C:
+				case <-w.stopCh:
+					timer.Stop()
+					w.logger.Printf("flush cancelled during shutdown table=%s rows=%d", table, len(rows))
+					return nil
+				}
+				timer.Stop()
+				w.logger.Printf("RETRY table=%s attempt=%d/%d backoff=%v", table, attempt, w.cfg.RetryMax, backoff)
+			}
+
+			// Fresh context per retry — defer cancel prevents leak on panic.
+			attemptCtx, attemptCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			batch, err := w.conn.PrepareBatch(attemptCtx, query, driver.WithReleaseConnection())
+			if err != nil {
+				if isTableNotFound(err) {
+					attemptCancel()
+					return errTableNotFound
+				}
+				lastErr = fmt.Errorf("prepare: %w", err)
+				attemptCancel()
+				continue
+			}
+
+			poisonIdx := -1
+			vals := make([]interface{}, len(columns))
+			for idx, pr := range rows {
+				for i, col := range columns {
+					vals[i] = pr.data[col]
+				}
+				if err := batch.Append(vals...); err != nil {
+					lastErr = fmt.Errorf("append row: %w", err)
+					poisonIdx = idx
+					break
+				}
+			}
+			if poisonIdx >= 0 {
+				// Structural error — DLQ the poison row and loop to retry without it.
+				if err := batch.Abort(); err != nil {
+					w.logger.Printf("WARNING batch abort error table=%s: %v", table, err)
+				}
+				attemptCancel()
+				w.dlqRow(table, rows[poisonIdx], lastErr)
+				if rows[poisonIdx].onFlush != nil {
+					rows[poisonIdx].onFlush()
+				}
+				metrics.RowsDLQ.WithLabelValues(table).Add(1)
+				// Remove poison row and continue the outer loop (iterative, not recursive)
+				remaining := make([]pendingRow, 0, len(rows)-1)
+				remaining = append(remaining, rows[:poisonIdx]...)
+				remaining = append(remaining, rows[poisonIdx+1:]...)
+				rows = remaining
+				break // break retry loop, continue poison loop
+			}
+
+			if err := batch.Send(); err != nil {
+				if isTableNotFound(err) {
+					attemptCancel()
+					return errTableNotFound
+				}
+				lastErr = fmt.Errorf("send: %w", err)
+				attemptCancel()
+				continue
+			}
+			attemptCancel()
+
+			// Success — call ack callbacks (at-least-once: checkpoint advances only now)
+			for _, pr := range rows {
+				if pr.onFlush != nil {
+					pr.onFlush()
+				}
+			}
+
+			flushedCount := len(rows)
+			elapsed := time.Since(start).Seconds()
+			w.logger.Printf("flushed table=%s rows=%d duration=%.3fs", table, flushedCount, elapsed)
+			metrics.RowsFlushed.WithLabelValues(table).Add(float64(flushedCount))
+			metrics.LastFlushedTimestampMs.WithLabelValues(table).Set(float64(time.Now().UnixMilli()))
+			metrics.FlushesTotal.WithLabelValues(table, "ok").Inc()
+			metrics.FlushLatency.WithLabelValues(table).Observe(elapsed)
+			metrics.FlushBatchSize.WithLabelValues(table).Observe(float64(flushedCount))
+			metrics.BufferSize.WithLabelValues(table).Set(float64(len(ch)))
+			if attempt > 0 {
+				metrics.RetriesTotal.WithLabelValues(table).Add(float64(attempt))
+			}
+			flushed = true
+			break // break retry loop
+		}
+
+		if flushed {
+			return nil
+		}
+
+		// Transient error exhaustion: ClickHouse is likely unreachable.
+		// Block until ClickHouse recovers, then retry the same batch.
+		w.logger.Printf("ERROR exhausted retries table=%s rows=%d err=%v — writer PAUSED (waiting for ClickHouse recovery)", table, len(rows), lastErr)
+		metrics.FlushesTotal.WithLabelValues(table, "error").Inc()
+		metrics.ErrorsTotal.WithLabelValues("writer", "critical").Inc()
+		if !w.waitForClickHouse(table) {
+			return nil // shutdown
+		}
+		// ClickHouse recovered — loop back to retry
 	}
-	// ClickHouse recovered — retry the same batch
-	return w.flush(table, rows, ch)
 }
 
 // isTableNotFound checks if a ClickHouse error indicates the target table doesn't exist.
@@ -641,13 +664,22 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 	}
 	defer f.Close()
 
+	// Cap DLQ file at 100MB to prevent disk-full from sustained schema drift
+	if fi, statErr := f.Stat(); statErr == nil && fi.Size() > 100*1024*1024 {
+		w.logger.Printf("ERROR DLQ file too large table=%s size=%dMB — new poison rows will be logged but not saved (fix the schema mismatch)", table, fi.Size()/(1024*1024))
+		metrics.ErrorsTotal.WithLabelValues("dlq", "full").Inc()
+		return
+	}
+
 	n, writeErr := f.Write(data)
 	if writeErr != nil || n != len(data) {
 		w.logger.Printf("DLQ write error table=%s: wrote %d/%d bytes: %v (poison row lost)", table, n, len(data), writeErr)
 		metrics.ErrorsTotal.WithLabelValues("dlq", "error").Inc()
 		return
 	}
-	f.Write([]byte("\n"))
+	if _, err := f.Write([]byte("\n")); err != nil {
+		w.logger.Printf("DLQ newline error table=%s: %v", table, err)
+	}
 
 	w.logger.Printf("DLQ poison row table=%s file=%s err=%v", table, filePath, appendErr)
 }
