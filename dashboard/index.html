@@ -552,8 +552,59 @@ function showSchemaModal(data) {
   document.body.appendChild(modal);
 }
 
-async function removeTable(name) {
-  if (!confirm('Remove ' + name + ' from config?\n\nNote: running reader stops on next restart.')) return;
+function removeTable(name) {
+  // Show confirmation modal — user must type the table name to confirm
+  const old = document.getElementById('confirm-modal');
+  if (old) old.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'confirm-modal';
+  modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:200;display:flex;align-items:center;justify-content:center';
+  modal.onclick = e => { if (e.target === modal) modal.remove(); };
+
+  modal.innerHTML = `<div style="background:var(--bg2);border:1px solid var(--red);border-radius:8px;padding:1.5rem;width:420px;max-width:95%">
+    <h2 style="font-size:0.9rem;color:var(--red);margin-bottom:0.75rem">Remove table</h2>
+    <p style="font-size:0.8rem;color:var(--fg2);margin-bottom:0.75rem">This will stop the CDC reader and remove <strong style="color:var(--fg)">${esc(name)}</strong> from the pipeline config.</p>
+    <p style="font-size:0.75rem;color:var(--fg2);margin-bottom:0.5rem">Type <strong style="color:var(--fg)">${esc(name)}</strong> to confirm:</p>
+    <input type="text" id="confirm-input" autocomplete="off" spellcheck="false"
+      style="display:block;width:100%;padding:0.5rem 0.75rem;margin-bottom:0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:var(--mono);font-size:0.8rem"
+      placeholder="${escAttr(name)}">
+    <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+      <button onclick="document.getElementById('confirm-modal').remove()"
+        style="padding:0.4rem 0.75rem;background:var(--bg3);border:1px solid var(--border);color:var(--fg);border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:0.8rem">Cancel</button>
+      <button id="confirm-remove-btn" disabled
+        style="padding:0.4rem 0.75rem;background:var(--bg3);border:1px solid var(--border);color:var(--fg2);border-radius:4px;cursor:not-allowed;font-family:var(--mono);font-size:0.8rem">Remove</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+
+  const inp = document.getElementById('confirm-input');
+  const btn = document.getElementById('confirm-remove-btn');
+  inp.focus();
+
+  inp.addEventListener('input', () => {
+    if (inp.value === name) {
+      btn.disabled = false;
+      btn.style.background = 'var(--red)';
+      btn.style.color = 'var(--bg)';
+      btn.style.borderColor = 'var(--red)';
+      btn.style.cursor = 'pointer';
+    } else {
+      btn.disabled = true;
+      btn.style.background = 'var(--bg3)';
+      btn.style.color = 'var(--fg2)';
+      btn.style.borderColor = 'var(--border)';
+      btn.style.cursor = 'not-allowed';
+    }
+  });
+
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter' && inp.value === name) doRemove(name); });
+  btn.addEventListener('click', () => { if (inp.value === name) doRemove(name); });
+}
+
+async function doRemove(name) {
+  const modal = document.getElementById('confirm-modal');
+  if (modal) modal.remove();
   try {
     const r = await fetch('/api/tables?name=' + encodeURIComponent(name), {method: 'DELETE'});
     const d = await r.json();
