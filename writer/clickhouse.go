@@ -112,6 +112,8 @@ type ClickHouseWriter struct {
 	wg     sync.WaitGroup
 	stopCh chan struct{}
 	closed int32 // atomic: 1 after Close() called — prevents hang on send
+
+	dlqTotalBytes int64 // atomic: global DLQ size across all tables (P2-10)
 }
 
 func NewClickHouseWriter(cfg config.ClickHouseConfig, batchCfg config.BatchConfig, logger *log.Logger, version ...string) (*ClickHouseWriter, error) {
@@ -289,11 +291,15 @@ func (w *ClickHouseWriter) tableWriter(table string, ch chan pendingRow) {
 					defer func() {
 						if r := recover(); r != nil {
 							w.logger.Printf("PANIC in flush during shutdown for table=%s: %v (%d rows lost)", table, r, len(buf))
+							metrics.RowsDropped.WithLabelValues(table).Add(float64(len(buf)))
 						}
 					}()
 					err := w.flush(table, buf, ch)
 					if err == errTableNotFound {
 						w.logger.Printf("table=%s not found during shutdown — %d rows not flushed (checkpoint frozen, will re-read from CDC on restart)", table, len(buf))
+						// These rows are not truly lost — checkpoint didn't advance, CDC will re-deliver on restart.
+						// But if the table never gets created, they're effectively dropped.
+						metrics.RowsDropped.WithLabelValues(table).Add(float64(len(buf)))
 					}
 				}()
 			}
@@ -379,8 +385,9 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 				w.logger.Printf("RETRY table=%s attempt=%d/%d backoff=%v", table, attempt, w.cfg.RetryMax, backoff)
 			}
 
-			// Fresh context per retry — defer cancel prevents leak on panic.
-			attemptCtx, attemptCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			// Fresh context per retry — timeout from config (default 2m, was hardcoded 30s).
+			// A too-short timeout causes infinite retry loops for large batches (P1-2).
+			attemptCtx, attemptCancel := context.WithTimeout(context.Background(), w.cfg.FlushTimeout)
 			batch, err := w.conn.PrepareBatch(attemptCtx, query, driver.WithReleaseConnection())
 			if err != nil {
 				if isTableNotFound(err) {
@@ -635,6 +642,15 @@ func (w *ClickHouseWriter) EnsureDatabase(ctx context.Context, database string) 
 // File: dlq/<table>.jsonl (one JSON object per line, append-only).
 // DLQ write failure is logged but never blocks the pipeline.
 func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) {
+	// Global DLQ cap (P2-10): prevent unbounded disk usage from N tables × 100MB each
+	globalBytes := atomic.LoadInt64(&w.dlqTotalBytes)
+	if globalBytes > w.cfg.DLQMaxBytes {
+		w.logger.Printf("ERROR global DLQ cap reached (%dMB/%dMB) — poison row for table=%s logged but not saved",
+			globalBytes/(1024*1024), w.cfg.DLQMaxBytes/(1024*1024), table)
+		metrics.ErrorsTotal.WithLabelValues("dlq", "full").Inc()
+		return
+	}
+
 	dlqDir := w.cfg.DLQDir
 	if err := os.MkdirAll(dlqDir, 0755); err != nil {
 		w.logger.Printf("DLQ mkdir error: %v (poison row lost for table=%s)", err, table)
@@ -664,7 +680,7 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 	}
 	defer f.Close()
 
-	// Cap DLQ file at 100MB to prevent disk-full from sustained schema drift
+	// Per-table cap at 100MB to prevent disk-full from sustained schema drift
 	if fi, statErr := f.Stat(); statErr == nil && fi.Size() > 100*1024*1024 {
 		w.logger.Printf("ERROR DLQ file too large table=%s size=%dMB — new poison rows will be logged but not saved (fix the schema mismatch)", table, fi.Size()/(1024*1024))
 		metrics.ErrorsTotal.WithLabelValues("dlq", "full").Inc()
@@ -681,9 +697,10 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 		w.logger.Printf("DLQ newline error table=%s: %v", table, err)
 	}
 
-	// Update DLQ size metric for observability
+	// Update DLQ size metrics for observability
 	if fi, statErr := f.Stat(); statErr == nil {
 		metrics.DLQBytes.WithLabelValues(table).Set(float64(fi.Size()))
+		atomic.AddInt64(&w.dlqTotalBytes, int64(len(data)+1)) // +1 for newline
 	}
 
 	w.logger.Printf("DLQ poison row table=%s file=%s err=%v", table, filePath, appendErr)

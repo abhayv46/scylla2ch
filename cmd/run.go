@@ -194,14 +194,27 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	}()
 
 	// 1. Connect to ScyllaDB — one session per keyspace (gocql sessions are keyspace-bound)
+	//    Retry up to 5 times with exponential backoff (P2-5: previously exited immediately).
 	var sessions []ksState
 	for _, ks := range keyspaces {
-		sess, err := connectScylla(cfg, ks, logger)
-		if err != nil {
+		var sess *gocql.Session
+		var connErr error
+		for attempt := 0; attempt < 5; attempt++ {
+			sess, connErr = connectScylla(cfg, ks, logger)
+			if connErr == nil {
+				break
+			}
+			if attempt < 4 {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second // 1s, 2s, 4s, 8s
+				logger.Printf("WARN ScyllaDB connect keyspace=%s attempt=%d/5 failed: %v — retrying in %v", ks, attempt+1, connErr, backoff)
+				time.Sleep(backoff)
+			}
+		}
+		if connErr != nil {
 			for _, s := range sessions {
 				s.session.Close()
 			}
-			return fmt.Errorf("scylla connect keyspace=%s: %w", ks, err)
+			return fmt.Errorf("scylla connect keyspace=%s (5 attempts exhausted): %w", ks, connErr)
 		}
 
 		// ClickHouse database = keyspace name by default.
@@ -260,6 +273,17 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	for _, s := range sessions {
 		sessionMap[s.keyspace] = s.session
 		chDBMap[s.keyspace] = s.chDB
+	}
+
+	// Validate no two keyspaces map to the same ClickHouse database (P2-6).
+	// This would cause silent data interleaving if both keyspaces have same-named tables.
+	chDBToKS := make(map[string]string, len(sessions))
+	for _, s := range sessions {
+		if existingKS, ok := chDBToKS[s.chDB]; ok && existingKS != s.keyspace {
+			logger.Printf("ERROR keyspaces %q and %q both map to ClickHouse database %q — tables with the same name would collide. Use per-keyspace CH database mapping.", existingKS, s.keyspace, s.chDB)
+			return fmt.Errorf("ClickHouse database collision: keyspaces %q and %q both map to %q", existingKS, s.keyspace, s.chDB)
+		}
+		chDBToKS[s.chDB] = s.keyspace
 	}
 
 	if cfg.Tables.AutoDiscover {
@@ -412,7 +436,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("progress manager for %s: %w", tableName, err)
 		}
 		// Wrap with retry to guard against transient ScyllaDB write failures (scylla-cdc-go#82).
-		progressMgr := &retryProgressManager{inner: baseMgr, maxRetries: 3, backoff: time.Second, logger: logger}
+		progressMgr := &retryProgressManager{inner: baseMgr, maxRetries: 3, backoff: time.Second, logger: logger, tableName: tableName}
 
 		// Per-reader context: canceled on table remove OR global shutdown
 		readerCtx, readerCancel := context.WithCancel(ctx)
@@ -470,8 +494,14 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				case runErr = <-runDone:
 					// Run returned within deadline.
 				case <-time.After(30 * time.Second):
-					logger.Printf("CRITICAL reader %s: Run() did not return within 30s after cancel — likely scylla-cdc-go#86 deadlock, abandoning", tblName)
+					logger.Printf("CRITICAL reader %s: Run() did not return within 30s after cancel — likely scylla-cdc-go#86 deadlock, abandoning goroutine (P2-4: leaked goroutine holds ScyllaDB session resources)", tblName)
 					metrics.ErrorsTotal.WithLabelValues("reader", "critical").Inc()
+					// Drain in background so the goroutine can eventually exit
+					go func() {
+						if err := <-runDone; err != nil {
+							logger.Printf("INFO abandoned reader %s eventually returned: %v", tblName, err)
+						}
+					}()
 					runErr = nil // treat as shutdown, don't log error below
 				}
 			}
@@ -666,6 +696,7 @@ type retryProgressManager struct {
 	maxRetries int
 	backoff    time.Duration
 	logger     *log.Logger
+	tableName  string // for CDC gap detection metrics
 }
 
 func (r *retryProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
@@ -675,7 +706,22 @@ func (r *retryProgressManager) StartGeneration(ctx context.Context, gen time.Tim
 	return r.inner.StartGeneration(ctx, gen)
 }
 func (r *retryProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID) (scyllacdc.Progress, error) {
-	return r.inner.GetProgress(ctx, gen, table, streamID)
+	progress, err := r.inner.GetProgress(ctx, gen, table, streamID)
+	if err == nil {
+		// CDC gap detection (P0-2): if the saved checkpoint is very old, the CDC log
+		// may have been TTL-expired. scylla-cdc-go will silently skip ahead.
+		// Log a warning and emit a metric so operators know data was lost.
+		checkpointTime := progress.LastProcessedRecordTime.Time()
+		if !checkpointTime.IsZero() {
+			age := time.Since(checkpointTime)
+			if age > 20*time.Hour { // CDC TTL is typically 24h; warn at 20h
+				r.logger.Printf("WARNING CDC gap detected table=%s: checkpoint is %.0f hours old — CDC log entries older than TTL (24h) are lost", r.tableName, age.Hours())
+				metrics.CDCGapSeconds.WithLabelValues(r.tableName).Set(age.Seconds())
+				metrics.ErrorsTotal.WithLabelValues("cdc_gap", "critical").Inc()
+			}
+		}
+	}
+	return progress, err
 }
 func (r *retryProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID, progress scyllacdc.Progress) error {
 	var lastErr error

@@ -127,13 +127,18 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 		}
 
 		values := c.extractValues(row)
-		if len(values) == 0 {
-			continue
-		}
 
-		// Add CDC metadata
+		// Add CDC metadata — always set, even for PK-only INSERTs.
 		cdcTime := change.Time.Time()
-		values["_cdc_ts"] = cdcTime.UTC() // CDC event time for ReplacingMergeTree version ordering (explicit UTC)
+		values["_cdc_ts"] = cdcTime.UTC()           // CDC event time for ReplacingMergeTree version ordering (explicit UTC)
+		values["_cdc_operation"] = int8(op)          // operation type (1=update, 2=insert) for downstream filtering
+
+		if len(values) <= 2 {
+			// Only _cdc_ts and _cdc_operation — PK-only INSERT with all non-PK columns null.
+			// Still emit the row so ClickHouse records the row's existence.
+			// Previously this was silently dropped (P2-7).
+			c.logger.Printf("DEBUG table=%s: PK-only row (no data columns), emitting with metadata only", c.shortTableName())
+		}
 
 		// Route: does this table have multi-target routing?
 		// Pass onFlush callback — checkpoint advances only after ClickHouse write succeeds
@@ -146,8 +151,14 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 
 		metrics.RowsConsumed.WithLabelValues(c.shortTableName()).Inc()
 		metrics.LastConsumedTimestampMs.WithLabelValues(c.shortTableName()).Set(float64(time.Now().UnixMilli()))
-		// Track CDC replication lag (how far behind real-time we are)
-		metrics.CDCLagSeconds.WithLabelValues(c.shortTableName()).Set(time.Since(cdcTime).Seconds())
+		// Track CDC replication lag (how far behind real-time we are).
+		// Clamp to 0: clock skew on a ScyllaDB node can produce future _cdc_ts,
+		// which makes lag negative and confuses dashboards/alerts (P2-9).
+		lag := time.Since(cdcTime).Seconds()
+		if lag < 0 {
+			lag = 0
+		}
+		metrics.CDCLagSeconds.WithLabelValues(c.shortTableName()).Set(lag)
 	}
 
 	return nil
@@ -194,7 +205,19 @@ func (c *Consumer) extractValues(row *scyllacdc.ChangeRow) map[string]interface{
 		}
 
 		rawVal, ok := row.GetValue(name)
-		if !ok || rawVal == nil {
+		if !ok {
+			// Column not in this CDC row — not touched in this operation. Skip.
+			continue
+		}
+		if rawVal == nil {
+			// Column present but nil — distinguish "not set" from "explicitly SET TO NULL".
+			// Without this check, explicit NULL writes are silently dropped and ClickHouse
+			// retains the old value after ReplacingMergeTree merge (P0-1 correctness bug).
+			deleted, hasMarker := row.IsDeleted(name)
+			if hasMarker && deleted {
+				// Explicitly SET TO NULL in ScyllaDB → write NULL to ClickHouse Nullable column
+				values[name] = nil
+			}
 			continue
 		}
 
@@ -462,7 +485,7 @@ func (c *Consumer) routeToTargets(values map[string]interface{}, tc *config.Tabl
 					}
 				}
 				// Always include CDC metadata — required for ReplacingMergeTree dedup.
-				// Users won't list _cdc_ts in route Columns (it's synthetic, not a ScyllaDB column).
+				// Users won't list _cdc_ts/_cdc_operation in route Columns (synthetic, not ScyllaDB columns).
 				if v, ok := values["_cdc_ts"]; ok {
 					row["_cdc_ts"] = v
 				}

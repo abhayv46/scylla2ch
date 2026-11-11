@@ -122,7 +122,9 @@ type BatchConfig struct {
 	Interval     time.Duration `yaml:"interval"`
 	RetryMax     int           `yaml:"retry_max"`
 	RetryBackoff time.Duration `yaml:"retry_backoff"`
-	DLQDir       string        `yaml:"dlq_dir"` // directory for poison row DLQ files (default: "dlq")
+	FlushTimeout time.Duration `yaml:"flush_timeout"` // per-INSERT timeout (default: 2m); prevents infinite retry on slow batches
+	DLQDir       string        `yaml:"dlq_dir"`       // directory for poison row DLQ files (default: "dlq")
+	DLQMaxBytes  int64         `yaml:"dlq_max_bytes"` // global DLQ cap across all tables (default: 1GB)
 }
 
 type TablesConfig struct {
@@ -341,8 +343,14 @@ func Load(path string) (*Config, error) {
 	if cfg.Batch.RetryBackoff == 0 {
 		cfg.Batch.RetryBackoff = 500 * time.Millisecond
 	}
+	if cfg.Batch.FlushTimeout == 0 {
+		cfg.Batch.FlushTimeout = 2 * time.Minute
+	}
 	if cfg.Batch.DLQDir == "" {
 		cfg.Batch.DLQDir = "dlq"
+	}
+	if cfg.Batch.DLQMaxBytes == 0 {
+		cfg.Batch.DLQMaxBytes = 1024 * 1024 * 1024 // 1 GB global cap
 	}
 	if cfg.ClickHouse.Port == 0 {
 		cfg.ClickHouse.Port = 9440

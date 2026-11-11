@@ -259,6 +259,16 @@ var (
 		[]string{"table"},
 	)
 
+	// --- CDC gap detection ---
+
+	CDCGapSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scylla2ch_cdc_gap_seconds",
+			Help: "Seconds of CDC data skipped due to log TTL expiry (>0 means data loss from extended downtime)",
+		},
+		[]string{"table"},
+	)
+
 	// --- DLQ / checkpoint observability ---
 
 	DLQBytes = prometheus.NewGaugeVec(
@@ -337,6 +347,7 @@ func init() {
 		GoroutineCount,
 		HeapAllocBytes,
 		BuildInfo,
+		CDCGapSeconds,
 		DLQBytes,
 		CheckpointErrorsTotal,
 	)
