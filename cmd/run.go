@@ -347,7 +347,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Track uptime (startTime set above when creating dashboard state)
+	// Track uptime + systemd watchdog heartbeat (WatchdogSec=300 in unit file).
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -357,6 +357,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				return
 			case <-ticker.C:
 				metrics.UptimeSeconds.Set(time.Since(startTime).Seconds())
+				sdNotify("WATCHDOG=1")
 			}
 		}
 	}()
@@ -492,6 +493,9 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	if err := upg.Ready(); err != nil {
 		return fmt.Errorf("tableflip ready: %w", err)
 	}
+	// Notify systemd: READY + MAINPID so systemd tracks the new child after tableflip handoff.
+	// Without this, systemd sees the old PID exit and restarts (10s gap instead of zero-downtime).
+	sdNotify(fmt.Sprintf("READY=1\nMAINPID=%d", os.Getpid()))
 	logger.Printf("process ready (pid=%d) — send SIGUSR2 for zero-downtime upgrade", os.Getpid())
 
 	// 8. SIGHUP config reload: re-read config file and start readers for NEW tables only.
@@ -606,6 +610,22 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 	logger.Printf("shutdown complete — all readers stopped")
 	return nil
+}
+
+// sdNotify sends a state string to systemd via the NOTIFY_SOCKET.
+// No-op when NOTIFY_SOCKET is unset (non-systemd or Type!=notify).
+// Used for READY=1+MAINPID (zero-downtime tableflip) and WATCHDOG=1 heartbeats.
+func sdNotify(state string) {
+	sock := os.Getenv("NOTIFY_SOCKET")
+	if sock == "" {
+		return
+	}
+	conn, err := net.Dial("unixgram", sock)
+	if err != nil {
+		return // best-effort: don't crash if systemd socket is unreachable
+	}
+	defer conn.Close()
+	conn.Write([]byte(state))
 }
 
 // connectScylla creates a gocql.Session for one keyspace.

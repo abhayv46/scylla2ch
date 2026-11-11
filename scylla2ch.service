@@ -6,12 +6,25 @@ StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
-Type=simple
+# Zero-downtime upgrade via tableflip + sd_notify:
+#   1. SIGUSR2 → old forks new child with inherited listeners
+#   2. New child connects to ScyllaDB + ClickHouse, starts CDC readers
+#   3. New child calls Ready() → sends sd_notify(READY=1, MAINPID=<new_pid>)
+#   4. systemd updates MAINPID to the new process
+#   5. Old process drains buffered rows, exits cleanly (code 0)
+#   6. systemd sees old PID exit but MAINPID is the new one → service stays "active"
+Type=notify
+NotifyAccess=all
 ExecStart=/usr/local/bin/scylla2ch run --config /etc/scylla2ch/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
-RestartSec=10
+# on-failure: clean exit (code 0) from tableflip handoff = no restart.
+# crash (non-zero) = systemd restarts. Safety net.
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
 TimeoutStopSec=30
+WatchdogSec=300
+KillMode=control-group
 EnvironmentFile=/etc/scylla2ch/env
 
 # Logging
