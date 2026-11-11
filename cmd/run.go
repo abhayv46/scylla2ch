@@ -238,13 +238,16 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	metrics.ScyllaConnected.Set(1)
 	metrics.ClickHouseConnected.Set(1)
 
-	// Ensure ClickHouse databases exist for all keyspaces
-	for _, s := range sessions {
-		ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := chWriter.EnsureDatabase(ensureCtx, s.chDB); err != nil {
-			logger.Printf("WARN auto-create database %s: %v", s.chDB, err)
+	// Auto-create ClickHouse databases only when auto_create is enabled.
+	// When off, databases are managed manually — skip to avoid noisy permission WARNs.
+	if cfg.Tables.AutoCreate {
+		for _, s := range sessions {
+			ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := chWriter.EnsureDatabase(ensureCtx, s.chDB); err != nil {
+				logger.Printf("WARN auto-create database %s: %v", s.chDB, err)
+			}
+			ensureCancel()
 		}
-		ensureCancel()
 	}
 
 	// 3. Build initial table list — scan all keyspaces
@@ -877,12 +880,13 @@ func reloadConfig(
 			chDBMap[ks] = chDB
 			sessionMu.Unlock()
 			factory.SetKeyspaceDB(ks, chDB)
-			// Use context.Background() to avoid silent failure if ctx is already cancelled during shutdown.
-			ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if dbErr := chWriter.EnsureDatabase(ensureCtx, chDB); dbErr != nil {
-				logger.Printf("WARN SIGHUP reload: auto-create database %s: %v", chDB, dbErr)
+			if newCfg.Tables.AutoCreate {
+				ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if dbErr := chWriter.EnsureDatabase(ensureCtx, chDB); dbErr != nil {
+					logger.Printf("WARN SIGHUP reload: auto-create database %s: %v", chDB, dbErr)
+				}
+				ensureCancel()
 			}
-			ensureCancel()
 			logger.Printf("SIGHUP reload: connected to keyspace %q (ClickHouse DB=%s)", ks, chDB)
 		}
 	}
