@@ -130,11 +130,10 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 
 		// Add CDC metadata — always set, even for PK-only INSERTs.
 		cdcTime := change.Time.Time()
-		values["_cdc_ts"] = cdcTime.UTC()           // CDC event time for ReplacingMergeTree version ordering (explicit UTC)
-		values["_cdc_operation"] = int8(op)          // operation type (1=update, 2=insert) for downstream filtering
+		values["_cdc_ts"] = cdcTime.UTC() // CDC event time for ReplacingMergeTree version ordering (explicit UTC)
 
-		if len(values) <= 2 {
-			// Only _cdc_ts and _cdc_operation — PK-only INSERT with all non-PK columns null.
+		if len(values) <= 1 {
+			// Only _cdc_ts — PK-only INSERT with all non-PK columns null.
 			// Still emit the row so ClickHouse records the row's existence.
 			// Previously this was silently dropped (P2-7).
 			c.logger.Printf("DEBUG table=%s: PK-only row (no data columns), emitting with metadata only", c.shortTableName())
@@ -485,12 +484,9 @@ func (c *Consumer) routeToTargets(values map[string]interface{}, tc *config.Tabl
 					}
 				}
 				// Always include CDC metadata — required for ReplacingMergeTree dedup.
-				// Users won't list _cdc_ts/_cdc_operation in route Columns (synthetic, not ScyllaDB columns).
+				// Users won't list _cdc_ts in route Columns (synthetic, not a ScyllaDB column).
 				if v, ok := values["_cdc_ts"]; ok {
 					row["_cdc_ts"] = v
-				}
-				if v, ok := values["_cdc_operation"]; ok {
-					row["_cdc_operation"] = v
 				}
 			}
 			// If target is fully-qualified (has dot), use as-is; otherwise prepend chDB

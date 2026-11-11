@@ -19,7 +19,7 @@
 //   - ReplacingMergeTree(_cdc_ts) — last-write-wins deduplication
 //   - ORDER BY (partition_keys, clustering_keys) — matches ScyllaDB PK
 //   - Nullable() for non-PK columns (CDC delta rows have sparse columns)
-//   - _cdc_operation Int8 + _cdc_ts DateTime64(6) — CDC metadata columns
+//   - _cdc_ts DateTime64(6) — CDC metadata column for RMT version ordering
 package converter
 
 import (
@@ -239,8 +239,7 @@ func (d *Discoverer) AutoCreateCHTable(
 		ddl.WriteString(",\n")
 	}
 
-	// Add CDC metadata columns
-	ddl.WriteString("    `_cdc_operation` Int8 DEFAULT 0,\n")
+	// Add CDC metadata column
 	ddl.WriteString("    `_cdc_ts` DateTime64(6) DEFAULT now64()\n")
 	ddl.WriteString(") ENGINE = ReplacingMergeTree(_cdc_ts)\n")
 	// Backtick-quote PK columns in ORDER BY (consistent with column definitions above)

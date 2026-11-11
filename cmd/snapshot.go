@@ -8,7 +8,6 @@
 // snapshot left off (CDC events have newer _cdc_ts, ReplacingMergeTree dedup wins).
 //
 // Each row gets:
-//   - _cdc_operation = 0 (snapshot, not a CDC delta)
 //   - _cdc_ts = now()   (baseline timestamp for ReplacingMergeTree versioning)
 //
 // WARNING: Only run snapshot BEFORE CDC starts. Re-running after CDC is active
@@ -183,7 +182,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		row := make(map[string]interface{}, len(colIndexes)+2) // +2 for _cdc_operation, _cdc_ts
+		row := make(map[string]interface{}, len(colIndexes)+1) // +1 for _cdc_ts
 		for _, idx := range colIndexes {
 			val := values[idx]
 			if val == nil {
@@ -201,8 +200,7 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 		// Add CDC metadata — matches what the CDC consumer adds.
 		// _cdc_ts = now so ReplacingMergeTree treats these as the baseline.
 		// CDC events arriving later will have newer _cdc_ts and win during dedup.
-		row["_cdc_operation"] = int8(0) // 0 = snapshot (not a CDC delta)
-		row["_cdc_ts"] = snapshotTime   // consistent timestamp for entire snapshot
+		row["_cdc_ts"] = snapshotTime // consistent timestamp for entire snapshot
 
 		// Route or direct add (with fallback to default table like CDC consumer)
 		if tc != nil && len(tc.Routes) > 0 {
@@ -216,7 +214,6 @@ func runSnapshot(cmd *cobra.Command, args []string) error {
 						}
 					}
 					// Always include CDC metadata — required for ReplacingMergeTree dedup
-					filtered["_cdc_operation"] = row["_cdc_operation"]
 					filtered["_cdc_ts"] = row["_cdc_ts"]
 					chWriter.Add(chDB+"."+route.Target, filtered)
 					matched = true

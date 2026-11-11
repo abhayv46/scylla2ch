@@ -873,8 +873,19 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 
 	// Pre-flight: compare ScyllaDB vs ClickHouse schema for type mismatches
 	var schemaWarnings []string
+	var schemaErrors []string
 	if anySession != nil && s.CHChecker != nil {
-		schemaWarnings = compareSchema(anySession, cdcKeyspace, scyllaTable, chFQN, s.CHChecker, s.Logger)
+		schemaWarnings, schemaErrors = compareSchema(anySession, cdcKeyspace, scyllaTable, chFQN, s.CHChecker, s.Logger)
+	}
+
+	// Block save if any column types don't match — prevents poison rows at runtime
+	if len(schemaErrors) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"ok":     false,
+			"error":  fmt.Sprintf("Schema mismatch: %d column type(s) don't match between ScyllaDB and ClickHouse — fix the ClickHouse table first", len(schemaErrors)),
+			"errors": schemaErrors,
+		})
+		return
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
@@ -1255,9 +1266,9 @@ func readGaugeValue(metricName string) float64 {
 	return 0
 }
 
-// compareSchema returns a list of warning strings about ScyllaDB vs ClickHouse column mismatches.
-// Called during add-table pre-flight. Non-blocking — errors return empty warnings.
-func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, checker CHTableChecker, logger *log.Logger) []string {
+// compareSchema returns warnings (informational) and errors (type mismatches that block save).
+// Called during add-table pre-flight. Type mismatches are errors because they cause poison rows.
+func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, checker CHTableChecker, logger *log.Logger) (warnings []string, errors []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1273,22 +1284,20 @@ func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, 
 	}
 	if err := iter.Close(); err != nil {
 		logger.Printf("dashboard schema-check: ScyllaDB columns query error: %v", err)
-		return nil
+		return nil, nil
 	}
 
 	// Get ClickHouse columns
 	chCols, err := checker.TableColumns(ctx, chFQN)
 	if err != nil {
 		logger.Printf("dashboard schema-check: ClickHouse columns query error: %v", err)
-		return nil
+		return nil, nil
 	}
 
 	chColMap := make(map[string]string, len(chCols))
 	for _, c := range chCols {
 		chColMap[c.Name] = c.Type
 	}
-
-	var warnings []string
 
 	// Check each ScyllaDB column against ClickHouse
 	for scyllaCol, cqlType := range scyllaCols {
@@ -1298,29 +1307,32 @@ func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, 
 			warnings = append(warnings, fmt.Sprintf("column '%s' (%s) exists in ScyllaDB but not in ClickHouse — will be skipped", scyllaCol, cqlType))
 			continue
 		}
-		// Compare expected type vs actual
+		// Compare expected type vs actual — mismatch = error (blocks save, prevents poison rows)
 		expectedCH := converter.CQLToClickHouseType(cqlType, false) // assume non-PK for Nullable wrapping
 		if !typeCompatible(expectedCH, chType) {
-			warnings = append(warnings, fmt.Sprintf("type mismatch: column '%s' — ScyllaDB %s → expected CH %s, got CH %s", scyllaCol, cqlType, expectedCH, chType))
+			errors = append(errors, fmt.Sprintf("type mismatch: column '%s' — ScyllaDB %s → expected CH %s, got CH %s", scyllaCol, cqlType, expectedCH, chType))
 		}
 	}
 
-	// Check for CH columns that don't exist in ScyllaDB (CDC metadata columns are expected)
-	// Also validate CDC metadata column types — scylla2ch sends _cdc_operation as Int8, _cdc_ts as DateTime64
-	cdcMetaExpected := map[string]string{"_cdc_operation": "Int8", "_cdc_ts": "DateTime64"}
+	// _cdc_ts is REQUIRED — it's the ReplacingMergeTree version column.
+	// Without it, dedup doesn't work and every CDC re-delivery creates a duplicate row.
+	if cdcTsType, hasCdcTs := chColMap["_cdc_ts"]; !hasCdcTs {
+		errors = append(errors, "missing required column '_cdc_ts' (DateTime64) — needed for ReplacingMergeTree dedup. Add it: ALTER TABLE ... ADD COLUMN `_cdc_ts` DateTime64(6) DEFAULT now64()")
+	} else if !strings.Contains(cdcTsType, "DateTime64") {
+		errors = append(errors, fmt.Sprintf("wrong type for '_cdc_ts' — expected DateTime64, got %s", cdcTsType))
+	}
+
+	// Check for CH columns that don't exist in ScyllaDB (extra columns are just informational)
 	for _, c := range chCols {
-		if expectedType, isCDC := cdcMetaExpected[c.Name]; isCDC {
-			if !strings.Contains(c.Type, expectedType) {
-				warnings = append(warnings, fmt.Sprintf("CDC metadata type mismatch: '%s' — scylla2ch sends %s, but ClickHouse has %s", c.Name, expectedType, c.Type))
-			}
-			continue
+		if c.Name == "_cdc_ts" {
+			continue // already validated above
 		}
 		if _, exists := scyllaCols[c.Name]; !exists {
 			warnings = append(warnings, fmt.Sprintf("column '%s' (%s) exists in ClickHouse but not in ScyllaDB — will always be NULL", c.Name, c.Type))
 		}
 	}
 
-	return warnings
+	return warnings, errors
 }
 
 // typeCompatible checks if the expected ClickHouse type (from CQL mapping) is compatible
@@ -1377,7 +1389,7 @@ func schemaCheckDetail(scyllaSession *gocql.Session, keyspace, table, chFQN stri
 	}
 
 	var columns []colInfo
-	cdcMetaCols := map[string]bool{"_cdc_operation": true, "_cdc_ts": true}
+	cdcMetaCols := map[string]bool{"_cdc_ts": true}
 	seen := make(map[string]bool)
 
 	// ScyllaDB columns
