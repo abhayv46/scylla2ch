@@ -259,6 +259,24 @@ var (
 		[]string{"table"},
 	)
 
+	// --- DLQ / checkpoint observability ---
+
+	DLQBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "scylla2ch_dlq_bytes",
+			Help: "DLQ file size in bytes, by table (detect schema drift accumulation)",
+		},
+		[]string{"table"},
+	)
+
+	CheckpointErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scylla2ch_checkpoint_errors_total",
+			Help: "Total checkpoint save failures, by table",
+		},
+		[]string{"table"},
+	)
+
 	// --- Runtime (goroutine/memory leak detection) ---
 
 	GoroutineCount = prometheus.NewGaugeFunc(
@@ -319,6 +337,8 @@ func init() {
 		GoroutineCount,
 		HeapAllocBytes,
 		BuildInfo,
+		DLQBytes,
+		CheckpointErrorsTotal,
 	)
 
 }

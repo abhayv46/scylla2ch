@@ -635,7 +635,7 @@ func (w *ClickHouseWriter) EnsureDatabase(ctx context.Context, database string) 
 // File: dlq/<table>.jsonl (one JSON object per line, append-only).
 // DLQ write failure is logged but never blocks the pipeline.
 func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) {
-	dlqDir := "dlq"
+	dlqDir := w.cfg.DLQDir
 	if err := os.MkdirAll(dlqDir, 0755); err != nil {
 		w.logger.Printf("DLQ mkdir error: %v (poison row lost for table=%s)", err, table)
 		return
@@ -679,6 +679,11 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 	}
 	if _, err := f.Write([]byte("\n")); err != nil {
 		w.logger.Printf("DLQ newline error table=%s: %v", table, err)
+	}
+
+	// Update DLQ size metric for observability
+	if fi, statErr := f.Stat(); statErr == nil {
+		metrics.DLQBytes.WithLabelValues(table).Set(float64(fi.Size()))
 	}
 
 	w.logger.Printf("DLQ poison row table=%s file=%s err=%v", table, filePath, appendErr)

@@ -350,10 +350,11 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Track uptime + systemd watchdog heartbeat (WatchdogSec=300 in unit file).
+	// Track uptime + systemd watchdog heartbeat + connection health checks.
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
+		healthTick := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -361,6 +362,24 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			case <-ticker.C:
 				metrics.UptimeSeconds.Set(time.Since(startTime).Seconds())
 				sdNotify("WATCHDOG=1")
+
+				// ScyllaDB health check every 30s (every 3rd tick).
+				healthTick++
+				if healthTick%3 == 0 {
+					allOK := true
+					for _, s := range sessions {
+						if s.session.Closed() {
+							allOK = false
+							break
+						}
+					}
+					if allOK {
+						metrics.ScyllaConnected.Set(1)
+					} else {
+						metrics.ScyllaConnected.Set(0)
+						logger.Printf("WARN ScyllaDB session closed — health check failed")
+					}
+				}
 			}
 		}
 	}()
@@ -388,10 +407,12 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	// The reader gets a per-table context so it can be stopped individually.
 	startReader := func(sess *gocql.Session, keyspace, tableName string) error {
 		progressTable := fmt.Sprintf("%s.%s", keyspace, config.ProgressTable)
-		progressMgr, err := scyllacdc.NewTableBackedProgressManager(sess, progressTable, "scylla2ch")
+		baseMgr, err := scyllacdc.NewTableBackedProgressManager(sess, progressTable, "scylla2ch")
 		if err != nil {
 			return fmt.Errorf("progress manager for %s: %w", tableName, err)
 		}
+		// Wrap with retry to guard against transient ScyllaDB write failures (scylla-cdc-go#82).
+		progressMgr := &retryProgressManager{inner: baseMgr, maxRetries: 3, backoff: time.Second, logger: logger}
 
 		// Per-reader context: canceled on table remove OR global shutdown
 		readerCtx, readerCancel := context.WithCancel(ctx)
@@ -432,10 +453,33 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				delete(readerCancels, tblName)
 				readerMu.Unlock()
 			}()
-			if err := reader.Run(readerCtx); err != nil && readerCtx.Err() == nil {
+
+			// Guard against scylla-cdc-go Reader.Run deadlock on context cancellation
+			// (upstream bug: github.com/scylladb/scylla-cdc-go/issues/86).
+			// Run in a sub-goroutine with a 30s deadline after context cancel.
+			runDone := make(chan error, 1)
+			go func() { runDone <- reader.Run(readerCtx) }()
+
+			var runErr error
+			select {
+			case runErr = <-runDone:
+				// Normal exit (clean or error).
+			case <-readerCtx.Done():
+				// Context cancelled (shutdown/upgrade/stop). Give Run 30s to return.
+				select {
+				case runErr = <-runDone:
+					// Run returned within deadline.
+				case <-time.After(30 * time.Second):
+					logger.Printf("CRITICAL reader %s: Run() did not return within 30s after cancel — likely scylla-cdc-go#86 deadlock, abandoning", tblName)
+					metrics.ErrorsTotal.WithLabelValues("reader", "critical").Inc()
+					runErr = nil // treat as shutdown, don't log error below
+				}
+			}
+
+			if runErr != nil && readerCtx.Err() == nil {
 				// One broken table does NOT take down the entire pipeline.
 				// Mark as stopped so dashboard shows the error. Restart via SIGHUP or dashboard.
-				logger.Printf("ERROR reader %s: %v — reader stopped (other tables continue, restart via dashboard or SIGHUP)", tblName, err)
+				logger.Printf("ERROR reader %s: %v — reader stopped (other tables continue, restart via dashboard or SIGHUP)", tblName, runErr)
 				metrics.ReaderErrorsTotal.WithLabelValues(tblName).Inc()
 				metrics.ErrorsTotal.WithLabelValues("reader", "error").Inc()
 				runningMu.Lock()
@@ -613,6 +657,43 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 	logger.Printf("shutdown complete — all readers stopped")
 	return nil
+}
+
+// retryProgressManager wraps a scyllacdc.ProgressManager to add retry logic
+// on SaveProgress failures (upstream scylla-cdc-go#82: no built-in retry).
+type retryProgressManager struct {
+	inner      scyllacdc.ProgressManager
+	maxRetries int
+	backoff    time.Duration
+	logger     *log.Logger
+}
+
+func (r *retryProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
+	return r.inner.GetCurrentGeneration(ctx)
+}
+func (r *retryProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
+	return r.inner.StartGeneration(ctx, gen)
+}
+func (r *retryProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID) (scyllacdc.Progress, error) {
+	return r.inner.GetProgress(ctx, gen, table, streamID)
+}
+func (r *retryProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID, progress scyllacdc.Progress) error {
+	var lastErr error
+	for attempt := 0; attempt <= r.maxRetries; attempt++ {
+		lastErr = r.inner.SaveProgress(ctx, gen, table, streamID, progress)
+		if lastErr == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return lastErr // context cancelled, don't retry
+		}
+		if attempt < r.maxRetries {
+			time.Sleep(r.backoff * time.Duration(attempt+1))
+		}
+	}
+	r.logger.Printf("ERROR checkpoint save failed after %d retries table=%s: %v", r.maxRetries+1, table, lastErr)
+	metrics.CheckpointErrorsTotal.WithLabelValues(table).Inc()
+	return lastErr
 }
 
 // sdNotify sends a state string to systemd via the NOTIFY_SOCKET.

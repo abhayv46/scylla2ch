@@ -57,6 +57,21 @@ import (
 	"scylla2ch/writer"
 )
 
+// pkgLogger is used by the package-level ConvertValue function for structured logging.
+// Set by SetLogger (called from factory). Falls back to the default log package.
+var pkgLogger *log.Logger
+
+// SetLogger sets the package-level logger for ConvertValue warnings.
+func SetLogger(l *log.Logger) { pkgLogger = l }
+
+func warnf(format string, args ...interface{}) {
+	if pkgLogger != nil {
+		pkgLogger.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
 // Consumer handles CDC changes for ONE stream of ONE table.
 // Uses Delta mode (no postimage required) — works with all production tables.
 //
@@ -118,7 +133,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 
 		// Add CDC metadata
 		cdcTime := change.Time.Time()
-		values["_cdc_ts"] = cdcTime // CDC event time for ReplacingMergeTree version ordering
+		values["_cdc_ts"] = cdcTime.UTC() // CDC event time for ReplacingMergeTree version ordering (explicit UTC)
 
 		// Route: does this table have multi-target routing?
 		// Pass onFlush callback — checkpoint advances only after ClickHouse write succeeds
@@ -216,7 +231,7 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 		// Log warning on overflow (indicates corrupt CDC data, not a real CQL int).
 		if v != nil {
 			if *v > math.MaxInt32 || *v < math.MinInt32 {
-				log.Printf("WARNING column=%s int overflow value=%d, truncating to int32 (CQL int is 32-bit)", name, *v)
+				warnf("WARNING column=%s int overflow value=%d, truncating to int32 (CQL int is 32-bit)", name, *v)
 			}
 			return int32(*v)
 		}
@@ -392,7 +407,7 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 		return v
 	case int:
 		if v > math.MaxInt32 || v < math.MinInt32 {
-			log.Printf("WARNING column=%s int overflow value=%d, truncating to int32", name, v)
+			warnf("WARNING column=%s int overflow value=%d, truncating to int32", name, v)
 		}
 		return int32(v)
 	case int16:

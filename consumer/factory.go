@@ -41,6 +41,7 @@ type Factory struct {
 }
 
 func NewFactory(cfg *config.Config, w *writer.ClickHouseWriter, l *log.Logger) *Factory {
+	SetLogger(l) // set package-level logger for ConvertValue warnings
 	return &Factory{cfg: cfg, writer: w, logger: l, chDBMap: make(map[string]string)}
 }
 

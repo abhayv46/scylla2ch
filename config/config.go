@@ -122,6 +122,7 @@ type BatchConfig struct {
 	Interval     time.Duration `yaml:"interval"`
 	RetryMax     int           `yaml:"retry_max"`
 	RetryBackoff time.Duration `yaml:"retry_backoff"`
+	DLQDir       string        `yaml:"dlq_dir"` // directory for poison row DLQ files (default: "dlq")
 }
 
 type TablesConfig struct {
@@ -339,6 +340,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Batch.RetryBackoff == 0 {
 		cfg.Batch.RetryBackoff = 500 * time.Millisecond
+	}
+	if cfg.Batch.DLQDir == "" {
+		cfg.Batch.DLQDir = "dlq"
 	}
 	if cfg.ClickHouse.Port == 0 {
 		cfg.ClickHouse.Port = 9440
