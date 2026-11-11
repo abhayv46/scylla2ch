@@ -507,22 +507,37 @@ func NewMux(s *State) http.Handler {
 					consumersActive = m.GetGauge().GetValue()
 				case "scylla2ch_tables_active":
 					tablesActive = m.GetGauge().GetValue()
+				case "scylla2ch_goroutines":
+					ensureTable(perTable, "_global")
+					perTable["_global"]["goroutines"] = m.GetGauge().GetValue()
+				case "scylla2ch_heap_alloc_bytes":
+					ensureTable(perTable, "_global")
+					perTable["_global"]["heap_alloc_bytes"] = m.GetGauge().GetValue()
 				}
 			}
 		}
 
-		// Extract global errors into separate field
-		globalErrors := perTable["_global"]
+		// Extract global errors and runtime metrics into separate field
+		globalMeta := perTable["_global"]
 		delete(perTable, "_global")
+		var goroutines, heapBytes interface{}
+		if globalMeta != nil {
+			goroutines = globalMeta["goroutines"]
+			heapBytes = globalMeta["heap_alloc_bytes"]
+			delete(globalMeta, "goroutines")
+			delete(globalMeta, "heap_alloc_bytes")
+		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"tables": perTable,
-			"errors": globalErrors,
+			"errors": globalMeta,
 			"totals": map[string]interface{}{
 				"rows_consumed":    totalConsumed,
 				"rows_flushed":     totalFlushed,
 				"consumers_active": consumersActive,
 				"tables_active":    tablesActive,
+				"goroutines":       goroutines,
+				"heap_alloc_bytes": heapBytes,
 			},
 		})
 	}))

@@ -1,0 +1,384 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "thresholds": { "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_uptime_seconds", "legendFormat": "uptime" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "title": "ScyllaDB",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }], "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_scylla_connected", "legendFormat": "scylla" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "title": "ClickHouse",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }], "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_clickhouse_connected", "legendFormat": "clickhouse" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "title": "Active Tables",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_tables_active", "legendFormat": "tables" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "title": "CDC Workers",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{ "color": "purple", "value": null }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_consumers_active", "legendFormat": "workers" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "title": "Rows Dropped (ALERT if > 0)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "sum(scylla2ch_rows_dropped_total)", "legendFormat": "dropped" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "title": "DLQ Rows (ALERT if > 0)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "sum(scylla2ch_rows_dlq_total)", "legendFormat": "dlq" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "title": "Goroutines",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }, { "color": "yellow", "value": 200 }, { "color": "red", "value": 500 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_goroutines", "legendFormat": "goroutines" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+
+    {
+      "title": "Throughput",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "title": "CDC Rows Read / sec (by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme", "spanNulls": true }, "unit": "rows/s" },
+        "overrides": []
+      },
+      "targets": [{ "expr": "rate(scylla2ch_rows_consumed_total[1m])", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } }
+    },
+    {
+      "title": "Rows Written / sec (by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme", "spanNulls": true }, "unit": "rows/s" },
+        "overrides": []
+      },
+      "targets": [{ "expr": "rate(scylla2ch_rows_flushed_total[1m])", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } }
+    },
+    {
+      "title": "Read vs Written (total)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }, "unit": "rows/s" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "read" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "written" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "expr": "sum(rate(scylla2ch_rows_consumed_total[1m]))", "legendFormat": "read" },
+        { "expr": "sum(rate(scylla2ch_rows_flushed_total[1m]))", "legendFormat": "written" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Deletes Skipped / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 50 }, "unit": "rows/s", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "rate(scylla2ch_deletes_skipped_total[5m])", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+
+    {
+      "title": "Latency & Flush",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false
+    },
+    {
+      "title": "CDC Lag (seconds, by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line" } }, "unit": "s", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 60 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_cdc_lag_seconds", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } }
+    },
+    {
+      "title": "Flush Latency p50 / p99 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }, "unit": "ms" },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(scylla2ch_flush_duration_seconds_bucket[5m])) * 1000", "legendFormat": "p50 {{table}}" },
+        { "expr": "histogram_quantile(0.99, rate(scylla2ch_flush_duration_seconds_bucket[5m])) * 1000", "legendFormat": "p99 {{table}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
+    },
+    {
+      "title": "Flush Batch Size (rows per flush)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 30 }, "unit": "rows" },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(scylla2ch_flush_batch_size_bucket[5m]))", "legendFormat": "p50 {{table}}" },
+        { "expr": "histogram_quantile(0.99, rate(scylla2ch_flush_batch_size_bucket[5m]))", "legendFormat": "p99 {{table}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Flushes / sec (ok vs error)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15 }, "unit": "ops/s" },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".*error.*" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "expr": "rate(scylla2ch_flushes_total{status=\"ok\"}[1m])", "legendFormat": "ok {{table}}" },
+        { "expr": "rate(scylla2ch_flushes_total{status=\"error\"}[1m])", "legendFormat": "error {{table}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+
+    {
+      "title": "Buffer & Back-pressure",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "collapsed": false
+    },
+    {
+      "title": "Buffer Depth (rows in channel)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "gradientMode": "scheme" }, "unit": "rows", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5000 }, { "color": "red", "value": 9000 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_buffer_rows", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Pipeline Lag (read - write timestamp)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s" },
+        "overrides": []
+      },
+      "targets": [{ "expr": "(scylla2ch_last_consumed_timestamp_ms - scylla2ch_last_flushed_timestamp_ms) / 1000", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+
+    {
+      "title": "Errors & Retries",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+      "collapsed": false
+    },
+    {
+      "title": "Errors by Component & Severity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 50 }, "unit": "errors/s" },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".*critical.*" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byRegexp", "options": ".*error.*" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byRegexp", "options": ".*warning.*" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [{ "expr": "rate(scylla2ch_errors_total[5m])", "legendFormat": "{{component}}/{{severity}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Retries / sec (by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 40 }, "unit": "retries/s", "color": { "mode": "palette-classic" } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "rate(scylla2ch_retries_total[5m])", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Reader Errors (by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 57 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 50 }, "color": { "fixedColor": "red", "mode": "fixed" } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "rate(scylla2ch_reader_errors_total[5m])", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Checkpoint Errors (by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 57 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 50 }, "color": { "fixedColor": "orange", "mode": "fixed" } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "rate(scylla2ch_checkpoint_errors_total[5m])", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "DLQ File Size (bytes, by table)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 57 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }, "unit": "bytes" },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_dlq_bytes", "legendFormat": "{{table}}" }],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "title": "Hot Reloads & SIGHUP",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 57 },
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }] } },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "scylla2ch_hot_reload_total", "legendFormat": "hot reloads" },
+        { "expr": "scylla2ch_sighup_reload_total", "legendFormat": "SIGHUP reloads" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+
+    {
+      "title": "Resources",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 65 },
+      "collapsed": false
+    },
+    {
+      "title": "Goroutines",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 66 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 200 }, { "color": "red", "value": 500 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_goroutines", "legendFormat": "goroutines" }],
+      "options": { "tooltip": { "mode": "single" } }
+    },
+    {
+      "title": "Heap Memory",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 66 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "scheme" }, "unit": "bytes", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 536870912 }, { "color": "red", "value": 1073741824 }] } },
+        "overrides": []
+      },
+      "targets": [{ "expr": "scylla2ch_heap_alloc_bytes", "legendFormat": "heap" }],
+      "options": { "tooltip": { "mode": "single" } }
+    },
+    {
+      "title": "Staleness (seconds since last activity)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 66 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }, "unit": "s", "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 300 }] } },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "time() - scylla2ch_last_consumed_timestamp_ms/1000", "legendFormat": "read {{table}}" },
+        { "expr": "time() - scylla2ch_last_flushed_timestamp_ms/1000", "legendFormat": "write {{table}}" }
+      ],
+      "options": { "tooltip": { "mode": "multi" } }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["scylla2ch", "cdc", "clickhouse"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["5s", "10s", "30s", "1m"] },
+  "timezone": "Asia/Kolkata",
+  "title": "ScyllaDB CDC → ClickHouse Pipeline",
+  "uid": "scylla2ch-main",
+  "version": 1
+}

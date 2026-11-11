@@ -107,6 +107,21 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 .metric .metric-value.stale-warning { color: #fbbf24; }
 .metric .metric-value.stale-danger { color: #f87171; }
 
+/* sparkline charts */
+.spark-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; margin-top: 0.75rem;
+  padding-top: 0.75rem; border-top: 1px solid var(--bg3); }
+.spark-box { position: relative; }
+.spark-box .spark-label { font-size: 0.65rem; color: var(--fg2); margin-bottom: 0.2rem; }
+.spark-box canvas { width: 100%; height: 40px; display: block; border-radius: 3px; }
+
+/* global charts */
+.global-charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
+.gchart { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; }
+.gchart .gchart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+.gchart .gchart-title { font-size: 0.7rem; color: var(--fg2); text-transform: uppercase; }
+.gchart .gchart-value { font-size: 1rem; font-weight: 600; }
+.gchart canvas { width: 100%; height: 60px; display: block; border-radius: 3px; }
+
 /* tooltip */
 [data-tip] { position: relative; }
 [data-tip]:hover::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
@@ -221,6 +236,25 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     <input type="text" id="new-table" placeholder="keyspace.table (e.g. chat.pending_rooms)" data-tip="ScyllaDB table name.\nUse keyspace.table format\nor just table name to auto-detect.">
     <input type="text" id="new-ch-table" placeholder="ClickHouse target (leave empty = same name)" data-tip="ClickHouse target table.\nLeave empty to use same name.\nUse database.table for\na different ClickHouse database.">
     <button onclick="addTable()">Stream Table</button>
+  </div>
+
+  <div class="global-charts" id="global-charts">
+    <div class="gchart">
+      <div class="gchart-header"><span class="gchart-title">Throughput (rows/s)</span><span class="gchart-value" id="gchart-throughput-val">-</span></div>
+      <canvas id="gchart-throughput" height="60"></canvas>
+    </div>
+    <div class="gchart">
+      <div class="gchart-header"><span class="gchart-title">CDC Lag (max, seconds)</span><span class="gchart-value" id="gchart-lag-val">-</span></div>
+      <canvas id="gchart-lag" height="60"></canvas>
+    </div>
+    <div class="gchart">
+      <div class="gchart-header"><span class="gchart-title">Buffer Depth (total rows)</span><span class="gchart-value" id="gchart-buffer-val">-</span></div>
+      <canvas id="gchart-buffer" height="60"></canvas>
+    </div>
+    <div class="gchart">
+      <div class="gchart-header"><span class="gchart-title">Memory (heap MB)</span><span class="gchart-value" id="gchart-mem-val">-</span></div>
+      <canvas id="gchart-mem" height="60"></canvas>
+    </div>
   </div>
 
   <div class="section-title" data-tip="Tables currently streaming CDC changes\nfrom ScyllaDB to ClickHouse in real-time.\nEach table runs independent CDC readers.">Streaming Tables</div>
@@ -455,6 +489,11 @@ function render() {
         <div class="metric" data-tip="When the last batch was written to ClickHouse.\nGreen < 1min, yellow < 5min, red > 5min.\nStale = flush blocked or no data."><div class="metric-label">last to ClickHouse</div><div class="metric-value ${staleClass(m.last_flushed_ms)}">${fmtAgo(m.last_flushed_ms)}</div></div>
         <div class="metric" data-tip="Time gap between last read (ScyllaDB) and\nlast write (ClickHouse). Shows how far\nbehind writes are from reads."><div class="metric-label">pipeline lag</div><div class="metric-value">${fmtLag(m)}</div></div>
       </div>
+      <div class="spark-row">
+        <div class="spark-box"><div class="spark-label">rows/s (read)</div><canvas data-spark="${escAttr(t.name)}-read" height="40"></canvas></div>
+        <div class="spark-box"><div class="spark-label">rows/s (written)</div><canvas data-spark="${escAttr(t.name)}-write" height="40"></canvas></div>
+        <div class="spark-box"><div class="spark-label">CDC lag (s)</div><canvas data-spark="${escAttr(t.name)}-lag" height="40"></canvas></div>
+      </div>
     </div>`;
   }).join('');
 
@@ -642,6 +681,145 @@ async function adjustConfig(field, delta) {
     if (d.ok) setTimeout(refresh, 500);
   } catch(e) { toast('Connection error', false); }
 }
+
+// --- Sparkline charts ---
+const HISTORY_SIZE = 60; // 60 data points = 5 min at 5s interval
+const history = { global: { throughput: [], lag: [], buffer: [], mem: [] }, tables: {} };
+let prevMetrics = null;
+
+function recordHistory() {
+  if (!metricsData) return;
+  const tbls = metricsData.tables || {};
+  const now = Date.now();
+
+  // Compute rates from previous snapshot
+  let totalReadRate = 0, totalWriteRate = 0, maxLag = 0, totalBuf = 0;
+  for (const [name, m] of Object.entries(tbls)) {
+    if (!history.tables[name]) history.tables[name] = { read: [], write: [], lag: [] };
+    const h = history.tables[name];
+
+    // Rate = delta / interval (approx 5s)
+    let readRate = 0, writeRate = 0;
+    if (prevMetrics && prevMetrics.tables && prevMetrics.tables[name]) {
+      const pm = prevMetrics.tables[name];
+      const dt = 5; // seconds between refreshes
+      readRate = Math.max(0, ((m.rows_consumed || 0) - (pm.rows_consumed || 0)) / dt);
+      writeRate = Math.max(0, ((m.rows_flushed || 0) - (pm.rows_flushed || 0)) / dt);
+    }
+    h.read.push(readRate); if (h.read.length > HISTORY_SIZE) h.read.shift();
+    h.write.push(writeRate); if (h.write.length > HISTORY_SIZE) h.write.shift();
+    h.lag.push(m.cdc_lag_seconds || 0); if (h.lag.length > HISTORY_SIZE) h.lag.shift();
+
+    totalReadRate += readRate;
+    totalWriteRate += writeRate;
+    maxLag = Math.max(maxLag, m.cdc_lag_seconds || 0);
+    totalBuf += (m.buffer_size || 0);
+  }
+
+  history.global.throughput.push(totalReadRate); if (history.global.throughput.length > HISTORY_SIZE) history.global.throughput.shift();
+  history.global.lag.push(maxLag); if (history.global.lag.length > HISTORY_SIZE) history.global.lag.shift();
+  history.global.buffer.push(totalBuf); if (history.global.buffer.length > HISTORY_SIZE) history.global.buffer.shift();
+
+  const heapMB = (metricsData.totals.heap_alloc_bytes || 0) / (1024 * 1024);
+  history.global.mem.push(heapMB); if (history.global.mem.length > HISTORY_SIZE) history.global.mem.shift();
+
+  prevMetrics = JSON.parse(JSON.stringify(metricsData));
+}
+
+function drawSparkline(canvas, data, color, thresholdColor, threshold) {
+  if (!canvas || !data.length) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
+
+  ctx.clearRect(0, 0, w, h);
+  const max = Math.max(...data, 1) * 1.1;
+  const step = w / (HISTORY_SIZE - 1);
+
+  // Threshold line
+  if (threshold !== undefined && threshold < max) {
+    const ty = h - (threshold / max) * h;
+    ctx.strokeStyle = thresholdColor || 'rgba(248,81,73,0.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(w, ty); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Fill
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  for (let i = 0; i < data.length; i++) {
+    const x = (HISTORY_SIZE - data.length + i) * step;
+    const y = h - (data[i] / max) * h;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo((HISTORY_SIZE - 1) * step, h);
+  ctx.closePath();
+  ctx.fillStyle = color.replace(')', ',0.1)').replace('rgb', 'rgba');
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = (HISTORY_SIZE - data.length + i) * step;
+    const y = h - (data[i] / max) * h;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Latest value dot
+  if (data.length > 0) {
+    const lx = (HISTORY_SIZE - 1) * step;
+    const ly = h - (data[data.length - 1] / max) * h;
+    ctx.beginPath(); ctx.arc(lx, ly, 2.5, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+  }
+}
+
+function renderCharts() {
+  const g = history.global;
+  const latest = g.throughput[g.throughput.length - 1] || 0;
+  const el = document.getElementById('gchart-throughput-val');
+  if (el) el.textContent = latest.toFixed(1);
+  drawSparkline(document.getElementById('gchart-throughput'), g.throughput, 'rgb(88,166,255)');
+
+  const latestLag = g.lag[g.lag.length - 1] || 0;
+  const lagEl = document.getElementById('gchart-lag-val');
+  if (lagEl) { lagEl.textContent = latestLag.toFixed(1) + 's'; lagEl.style.color = latestLag > 60 ? 'var(--red)' : latestLag > 10 ? 'var(--yellow)' : 'var(--green)'; }
+  drawSparkline(document.getElementById('gchart-lag'), g.lag, 'rgb(210,153,34)', 'rgba(248,81,73,0.3)', 60);
+
+  const latestBuf = g.buffer[g.buffer.length - 1] || 0;
+  const bufEl = document.getElementById('gchart-buffer-val');
+  if (bufEl) bufEl.textContent = fmt(latestBuf);
+  drawSparkline(document.getElementById('gchart-buffer'), g.buffer, 'rgb(188,140,255)');
+
+  const latestMem = g.mem[g.mem.length - 1] || 0;
+  const memEl = document.getElementById('gchart-mem-val');
+  if (memEl) memEl.textContent = latestMem.toFixed(1) + ' MB';
+  drawSparkline(document.getElementById('gchart-mem'), g.mem, 'rgb(57,210,192)');
+
+  // Per-table sparklines
+  for (const [name, h] of Object.entries(history.tables)) {
+    const readC = document.querySelector(`[data-spark="${CSS.escape(name)}-read"]`);
+    const writeC = document.querySelector(`[data-spark="${CSS.escape(name)}-write"]`);
+    const lagC = document.querySelector(`[data-spark="${CSS.escape(name)}-lag"]`);
+    drawSparkline(readC, h.read, 'rgb(88,166,255)');
+    drawSparkline(writeC, h.write, 'rgb(63,185,80)');
+    drawSparkline(lagC, h.lag, 'rgb(210,153,34)', 'rgba(248,81,73,0.3)', 60);
+  }
+}
+
+// Hook into refresh cycle
+const origRefresh = refresh;
+refresh = async function() {
+  await origRefresh();
+  recordHistory();
+  renderCharts();
+};
 
 function toast(msg, ok, duration) {
   const el = $('toast');
