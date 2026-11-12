@@ -59,8 +59,8 @@ tables:
 	if cfg.CDC.ChangeAgeLimit != 8*time.Hour {
 		t.Errorf("cdc.change_age_limit default: expected 8h, got %v", cfg.CDC.ChangeAgeLimit)
 	}
-	if cfg.CDC.CheckpointInterval != 1*time.Hour {
-		t.Errorf("cdc.checkpoint_interval default: expected 1h, got %v", cfg.CDC.CheckpointInterval)
+	if cfg.CDC.CheckpointInterval != 1*time.Minute {
+		t.Errorf("cdc.checkpoint_interval default: expected 1m, got %v", cfg.CDC.CheckpointInterval)
 	}
 	if cfg.CDC.CheckpointFile != "/etc/scylla2ch/checkpoints.json" {
 		t.Errorf("cdc.checkpoint_file default: expected /etc/scylla2ch/checkpoints.json, got %v", cfg.CDC.CheckpointFile)

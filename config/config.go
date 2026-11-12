@@ -379,7 +379,7 @@ func Load(path string) (*Config, error) {
 		cfg.CDC.ChangeAgeLimit = 8 * time.Hour
 	}
 	if cfg.CDC.CheckpointInterval == 0 {
-		cfg.CDC.CheckpointInterval = 1 * time.Hour
+		cfg.CDC.CheckpointInterval = 1 * time.Minute
 	}
 	if cfg.CDC.CheckpointFile == "" {
 		cfg.CDC.CheckpointFile = "/etc/scylla2ch/checkpoints.json"
