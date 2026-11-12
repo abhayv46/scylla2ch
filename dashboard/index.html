@@ -240,15 +240,18 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     <input type="text" id="new-ch-table" placeholder="ClickHouse target (leave empty = same name)" data-tip="ClickHouse target table.\nLeave empty to use same name.\nUse database.table for\na different ClickHouse database.">
     <input type="number" id="new-batch-size" placeholder="batch size (default: 500)" min="10" max="100000" style="width:160px" data-tip="Rows per flush for this table.\nHigher = fewer ClickHouse INSERTs.\nDefault: 500 (global).">
     <input type="number" id="new-batch-interval" placeholder="interval ms (default: 1000)" min="100" max="60000" step="100" style="width:170px" data-tip="Flush interval in milliseconds.\nExamples: 500, 1000, 5000, 10000.\nDefault: 1000ms (global).">
-    <select id="new-start-from" style="width:150px" data-tip="How far back to read CDC history\nwhen starting this table.\n'Now' starts from current time.\nCDC data retained for ~24h (TTL).">
-      <option value="">Now (default)</option>
-      <option value="5m">Last 5 min</option>
-      <option value="30m">Last 30 min</option>
-      <option value="1h">Last 1 hour</option>
-      <option value="4h">Last 4 hours</option>
-      <option value="8h">Last 8 hours</option>
-      <option value="24h">Last 24 hours (max CDC TTL)</option>
-    </select>
+    <input type="text" id="new-start-from" list="start-from-opts" placeholder="Start from (default: now)" style="width:170px" data-tip="How far back to read CDC history.\nType any Go duration: 1s, 30s, 5m, 1h, 8h…\nEmpty = now (starts from current time).\nCDC data retained for ~24h (TTL).">
+    <datalist id="start-from-opts">
+      <option value="1s">1 second</option>
+      <option value="5s">5 seconds</option>
+      <option value="30s">30 seconds</option>
+      <option value="5m">5 minutes</option>
+      <option value="30m">30 minutes</option>
+      <option value="1h">1 hour</option>
+      <option value="4h">4 hours</option>
+      <option value="8h">8 hours</option>
+      <option value="24h">24 hours (max CDC TTL)</option>
+    </datalist>
     <button onclick="addTable()">Stream Table</button>
   </div>
 
