@@ -24,6 +24,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,6 +38,10 @@ import (
 	"scylla2ch/config"
 	"scylla2ch/converter"
 )
+
+// FIX M4: Table name validation — only allow safe identifier characters.
+// Prevents YAML injection or filesystem issues from malicious table names.
+var validTableName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 //go:embed index.html
 var indexHTML embed.FS
@@ -713,6 +718,15 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
+	// FIX M4: Validate table name characters — prevent YAML/path injection.
+	// Accept "keyspace.table" or just "table", each part must be a valid identifier.
+	for _, part := range strings.SplitN(req.Name, ".", 2) {
+		if !validTableName.MatchString(part) {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": fmt.Sprintf("invalid table name %q — only letters, digits, underscores allowed", part)})
+			return
+		}
+	}
+
 	// Parse per-table batch config (like Kafka per-topic consumer config)
 	var batchInterval time.Duration
 	if req.BatchInterval != "" {
@@ -1185,13 +1199,19 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 		explicitNode.Content = newContent
 	}
 
-	// Write back
+	// FIX M6: Atomic config write via temp file + rename.
+	// Prevents SIGHUP from reading a partially-written file.
 	out, err := yaml.Marshal(&doc)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.WriteFile(cfgFile, out, 0644); err != nil {
-		return fmt.Errorf("write config: %w", err)
+	tmpFile := cfgFile + ".tmp"
+	if err := os.WriteFile(tmpFile, out, 0644); err != nil {
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := os.Rename(tmpFile, cfgFile); err != nil {
+		os.Remove(tmpFile) // cleanup on rename failure
+		return fmt.Errorf("rename config: %w", err)
 	}
 	return nil
 }
@@ -1298,11 +1318,20 @@ func modifyConfigBatch(cfgFile string, batchSize *int, batchInterval *string) er
 		setYAMLField(batchNode, "interval", *batchInterval)
 	}
 
+	// FIX M6: Atomic config write (same as modifyConfigTables)
 	out, err := yaml.Marshal(&doc)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(cfgFile, out, 0644)
+	tmpFile := cfgFile + ".tmp"
+	if err := os.WriteFile(tmpFile, out, 0644); err != nil {
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := os.Rename(tmpFile, cfgFile); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("rename config: %w", err)
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

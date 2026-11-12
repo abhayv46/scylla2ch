@@ -26,11 +26,11 @@ tables:
 `
 	cfg := loadFromString(t, yaml)
 
-	if cfg.Batch.Size != 10000 {
-		t.Errorf("batch.size default: expected 10000, got %d", cfg.Batch.Size)
+	if cfg.Batch.Size != 500 {
+		t.Errorf("batch.size default: expected 500, got %d", cfg.Batch.Size)
 	}
-	if cfg.Batch.Interval != 5*time.Second {
-		t.Errorf("batch.interval default: expected 5s, got %v", cfg.Batch.Interval)
+	if cfg.Batch.Interval != 1*time.Second {
+		t.Errorf("batch.interval default: expected 1s, got %v", cfg.Batch.Interval)
 	}
 	if cfg.Batch.RetryMax != 3 {
 		t.Errorf("batch.retry_max default: expected 3, got %d", cfg.Batch.RetryMax)
@@ -50,8 +50,8 @@ tables:
 	if cfg.ClickHouse.MaxIdleConns != 5 {
 		t.Errorf("clickhouse.max_idle_conns default: expected 5, got %d", cfg.ClickHouse.MaxIdleConns)
 	}
-	if cfg.CDC.ConfidenceWindow != 5*time.Second {
-		t.Errorf("cdc.confidence_window default: expected 5s, got %v", cfg.CDC.ConfidenceWindow)
+	if cfg.CDC.ConfidenceWindow != 30*time.Second {
+		t.Errorf("cdc.confidence_window default: expected 30s, got %v", cfg.CDC.ConfidenceWindow)
 	}
 	if cfg.CDC.QueryWindow != 1*time.Minute {
 		t.Errorf("cdc.query_window default: expected 1m, got %v", cfg.CDC.QueryWindow)

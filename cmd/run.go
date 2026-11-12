@@ -966,11 +966,19 @@ func reloadConfig(
 	logger.Printf("SIGHUP received — reloading config from %s", cfgFile)
 	metrics.SighupReloadTotal.Inc()
 
+	// FIX C4: Retry config load once after 500ms — dashboard writes are non-atomic
+	// so SIGHUP may arrive while the file is partially written.
 	newCfg, err := config.Load(cfgFile)
 	if err != nil {
-		logger.Printf("WARN SIGHUP reload: config parse error: %v — keeping current config", err)
-		metrics.ErrorsTotal.WithLabelValues("reload", "warning").Inc()
-		return
+		logger.Printf("WARN SIGHUP reload: config parse error: %v — retrying in 500ms (may be partial file write)", err)
+		time.Sleep(500 * time.Millisecond)
+		newCfg, err = config.Load(cfgFile)
+		if err != nil {
+			logger.Printf("WARN SIGHUP reload: config still invalid after retry: %v — keeping current config", err)
+			metrics.ErrorsTotal.WithLabelValues("reload", "warning").Inc()
+			return
+		}
+		logger.Printf("SIGHUP reload: config loaded successfully on retry")
 	}
 
 	// Build new table list

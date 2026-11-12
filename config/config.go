@@ -218,6 +218,9 @@ func (r *RouteConfig) Matches(row map[string]interface{}) bool {
 }
 
 func evalCondition(cond string, row map[string]interface{}) bool {
+	// FIX L1: Normalize whitespace — "col   IS NOT NULL" and "col IS NOT NULL" both work
+	cond = strings.Join(strings.Fields(cond), " ")
+
 	if strings.HasSuffix(cond, "IS NOT NULL") {
 		col := strings.TrimSpace(strings.TrimSuffix(cond, "IS NOT NULL"))
 		val, exists := row[col]
@@ -372,7 +375,7 @@ func Load(path string) (*Config, error) {
 		cfg.ClickHouse.MaxIdleConns = 5
 	}
 	if cfg.CDC.ConfidenceWindow == 0 {
-		cfg.CDC.ConfidenceWindow = 5 * time.Second
+		cfg.CDC.ConfidenceWindow = 30 * time.Second // FIX C1: 5s was below ScyllaDB write timeout, causing missed rows
 	}
 	if cfg.CDC.QueryWindow == 0 {
 		cfg.CDC.QueryWindow = 1 * time.Minute
@@ -404,8 +407,24 @@ func Load(path string) (*Config, error) {
 	if cfg.Batch.Interval <= 0 {
 		return nil, fmt.Errorf("batch.interval must be > 0")
 	}
+	if cfg.Batch.RetryMax < 0 {
+		return nil, fmt.Errorf("batch.retry_max must be >= 0 (got %d)", cfg.Batch.RetryMax)
+	}
 	if cfg.Health.Port != 0 && cfg.Metrics.Port != 0 && cfg.Health.Port == cfg.Metrics.Port {
 		return nil, fmt.Errorf("health.port (%d) and metrics.port (%d) cannot be the same", cfg.Health.Port, cfg.Metrics.Port)
+	}
+	if cfg.Health.Port < 0 || cfg.Health.Port > 65535 {
+		return nil, fmt.Errorf("health.port must be 0-65535 (got %d)", cfg.Health.Port)
+	}
+	if cfg.Metrics.Port < 0 || cfg.Metrics.Port > 65535 {
+		return nil, fmt.Errorf("metrics.port must be 0-65535 (got %d)", cfg.Metrics.Port)
+	}
+	if cfg.ClickHouse.Port < 0 || cfg.ClickHouse.Port > 65535 {
+		return nil, fmt.Errorf("clickhouse.port must be 0-65535 (got %d)", cfg.ClickHouse.Port)
+	}
+	// Warn if both keyspace and keyspaces are set (keyspaces takes priority)
+	if cfg.Scylla.Keyspace != "" && len(cfg.Scylla.Keyspaces) > 0 {
+		log.Printf("WARN config: both scylla.keyspace and scylla.keyspaces set — keyspaces takes priority")
 	}
 
 	// Validate route filters — mixed AND/OR is ambiguous (no operator precedence)

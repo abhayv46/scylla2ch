@@ -50,6 +50,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -241,7 +242,8 @@ func (w *ClickHouseWriter) GetTableBatchConfig(table string) (int, time.Duration
 //   - On restart, rows are re-read from the last checkpoint
 func (w *ClickHouseWriter) Add(table string, row map[string]interface{}, onFlush ...func()) {
 	if atomic.LoadInt32(&w.closed) == 1 {
-		return // drop silently after shutdown
+		metrics.RowsDropped.WithLabelValues("_post_shutdown").Inc() // FIX H11: track rows arriving after shutdown
+		return
 	}
 	ch := w.getOrCreateChan(table)
 	if ch == nil {
@@ -431,7 +433,11 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 
 		for attempt := 0; attempt <= w.cfg.RetryMax; attempt++ {
 			if attempt > 0 {
-				backoff := w.cfg.RetryBackoff * time.Duration(1<<uint(attempt-1))
+				// FIX H12: Add jitter to retry backoff to prevent thundering herd
+				// when multiple tables retry simultaneously after ClickHouse recovery.
+				base := w.cfg.RetryBackoff * time.Duration(1<<uint(attempt-1))
+				jitter := time.Duration(rand.Int63n(int64(base) / 4)) // up to 25% jitter
+				backoff := base + jitter
 				timer := time.NewTimer(backoff)
 				select {
 				case <-timer.C:

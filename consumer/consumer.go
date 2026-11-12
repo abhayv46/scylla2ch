@@ -395,6 +395,34 @@ func ConvertValue(name string, rawVal interface{}) interface{} {
 		}
 		return out
 
+	// === Collection types for arbitrary precision (FIX H1: list<varint>, list<decimal>, list<duration>) ===
+
+	case []*big.Int:
+		// list<varint> → Array(String)
+		out := make([]string, len(v))
+		for i, x := range v {
+			if x != nil {
+				out[i] = x.String()
+			}
+		}
+		return out
+	case []*inf.Dec:
+		// list<decimal> → Array(String)
+		out := make([]string, len(v))
+		for i, x := range v {
+			if x != nil {
+				out[i] = x.String()
+			}
+		}
+		return out
+	case []gocql.Duration:
+		// list<duration> → Array(String)
+		out := make([]string, len(v))
+		for i, x := range v {
+			out[i] = fmt.Sprintf("%v", x)
+		}
+		return out
+
 	// === Map types → JSON string for ClickHouse ===
 
 	case map[string]string:
@@ -518,14 +546,44 @@ func (c *Consumer) Empty(ctx context.Context, ackTime gocql.UUID) error {
 	return nil
 }
 
-// toJSON marshals a value to JSON string. Falls back to fmt.Sprintf on marshal failure
-// (should never happen with CQL data, but prevents silent empty-string data loss).
+// toJSON marshals a value to JSON string. Falls back to fmt.Sprintf on marshal failure.
+// FIX H3: Pre-converts gocql.UUID values to hex strings before JSON marshaling,
+// because json.Marshal(gocql.UUID) produces base64 (it's a [16]byte), not hex.
 func toJSON(v interface{}) string {
-	b, err := json.Marshal(v)
+	converted := convertUUIDsForJSON(v)
+	b, err := json.Marshal(converted)
 	if err != nil {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(b)
+}
+
+// convertUUIDsForJSON recursively converts gocql.UUID values to hex strings
+// so JSON output is consistent with standalone UUID columns (H3 fix).
+func convertUUIDsForJSON(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(val))
+		for k, v2 := range val {
+			out[k] = convertUUIDsForJSON(v2)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, v2 := range val {
+			out[i] = convertUUIDsForJSON(v2)
+		}
+		return out
+	case gocql.UUID:
+		return val.String()
+	case *gocql.UUID:
+		if val != nil {
+			return val.String()
+		}
+		return nil
+	default:
+		return v
+	}
 }
 
 func (c *Consumer) shortTableName() string {

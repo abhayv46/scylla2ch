@@ -135,7 +135,7 @@ func mapCQLType(cqlType string) string {
 }
 
 // extractInner extracts the inner element type from collection types.
-// Handles nested frozen wrappers.
+// Uses bracket-depth counting for correct nested type extraction.
 //
 // Examples:
 //   "frozen<list<text>>"          → "text"
@@ -143,22 +143,43 @@ func mapCQLType(cqlType string) string {
 //   "frozen<list<frozen<map<text, text>>>>" → "frozen<map<text, text>>"
 //   "list<uuid>"                  → "uuid"
 func extractInner(cqlType string) string {
-	// Remove frozen< wrapper if present
+	// Remove frozen< wrapper if present using bracket matching
 	s := cqlType
 	if strings.HasPrefix(s, "frozen<") {
-		s = strings.TrimPrefix(s, "frozen<")
-		s = strings.TrimSuffix(s, ">")
+		s = s[7:] // strip "frozen<"
+		// Find matching closing > by counting bracket depth
+		if end := matchingBracket(s); end >= 0 {
+			s = s[:end]
+		}
 	}
 
-	// Now extract inner from list<X> or set<X>
+	// Now extract inner from list<X> or set<X> using bracket matching
 	if idx := strings.Index(s, "<"); idx != -1 {
 		inner := s[idx+1:]
-		// Remove the outermost closing >
-		if lastIdx := strings.LastIndex(inner, ">"); lastIdx != -1 {
-			inner = inner[:lastIdx]
+		// Find the matching closing > for the outer collection bracket
+		if end := matchingBracket(inner); end >= 0 {
+			inner = inner[:end]
 		}
 		return strings.TrimSpace(inner)
 	}
 
 	return "text" // fallback
+}
+
+// matchingBracket finds the position of the closing > that matches the outermost level.
+// Returns -1 if no matching bracket found.
+func matchingBracket(s string) int {
+	depth := 0
+	for i, ch := range s {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
 }

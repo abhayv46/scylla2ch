@@ -91,64 +91,62 @@ func (d *Discoverer) ScanForCDCTables(session *gocql.Session, keyspace string) (
 }
 
 // GetScyllaColumns reads column metadata from system_schema.columns.
+// FIX C2: Single query, sort partition/clustering/regular independently by position
+// to prevent non-deterministic ORDER BY on composite PK tables (positions are per-kind).
 func (d *Discoverer) GetScyllaColumns(session *gocql.Session, keyspace, tableName string) ([]ColumnInfo, error) {
-	// Get partition key and clustering columns
-	pkCols := make(map[string]bool)
-
-	// Query all columns and filter PK in Go (avoid potential ALLOW FILTERING issues on system tables)
 	iter := session.Query(
-		"SELECT column_name, kind FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?",
-		keyspace, tableName,
-	).Iter()
-
-	var colName, colKind string
-	for iter.Scan(&colName, &colKind) {
-		if colKind == "partition_key" || colKind == "clustering" {
-			pkCols[colName] = true
-		}
-	}
-	if err := iter.Close(); err != nil {
-		return nil, fmt.Errorf("get pk columns: %w", err)
-	}
-
-	// All columns with types
-	// NOTE: Cannot use ORDER BY position — position is not a clustering column in system_schema.columns.
-	// CQL only allows ORDER BY on clustering keys. We sort in Go instead.
-	iter = session.Query(
 		"SELECT column_name, type, kind, position FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?",
 		keyspace, tableName,
 	).Iter()
 
-	var colType, kind string
+	var colName, colType, kind string
 	var position int
+
 	type colWithPos struct {
 		info ColumnInfo
+		kind string
 		pos  int
 	}
-	var colsWithPos []colWithPos
+	var partitionKeys, clusteringKeys, regularCols []colWithPos
 
 	for iter.Scan(&colName, &colType, &kind, &position) {
-		colsWithPos = append(colsWithPos, colWithPos{
+		c := colWithPos{
 			info: ColumnInfo{
 				Name: colName,
 				Type: colType,
-				IsPK: pkCols[colName],
+				IsPK: kind == "partition_key" || kind == "clustering",
 			},
-			pos: position,
-		})
+			kind: kind,
+			pos:  position,
+		}
+		switch kind {
+		case "partition_key":
+			partitionKeys = append(partitionKeys, c)
+		case "clustering":
+			clusteringKeys = append(clusteringKeys, c)
+		default:
+			regularCols = append(regularCols, c)
+		}
 	}
 	if err := iter.Close(); err != nil {
 		return nil, fmt.Errorf("get columns: %w", err)
 	}
 
-	// Sort by position (PK columns first by position, then regular columns)
-	sort.Slice(colsWithPos, func(i, j int) bool {
-		return colsWithPos[i].pos < colsWithPos[j].pos
-	})
+	// Sort each group independently by position (positions are per-kind in ScyllaDB)
+	sort.Slice(partitionKeys, func(i, j int) bool { return partitionKeys[i].pos < partitionKeys[j].pos })
+	sort.Slice(clusteringKeys, func(i, j int) bool { return clusteringKeys[i].pos < clusteringKeys[j].pos })
+	sort.Slice(regularCols, func(i, j int) bool { return regularCols[i].pos < regularCols[j].pos })
 
-	columns := make([]ColumnInfo, len(colsWithPos))
-	for i, c := range colsWithPos {
-		columns[i] = c.info
+	// Emit: partition keys first, then clustering, then regular — deterministic ORDER BY
+	columns := make([]ColumnInfo, 0, len(partitionKeys)+len(clusteringKeys)+len(regularCols))
+	for _, c := range partitionKeys {
+		columns = append(columns, c.info)
+	}
+	for _, c := range clusteringKeys {
+		columns = append(columns, c.info)
+	}
+	for _, c := range regularCols {
+		columns = append(columns, c.info)
 	}
 
 	return columns, nil
