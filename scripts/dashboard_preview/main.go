@@ -28,6 +28,10 @@ func (m *mockCHChecker) TableColumns(_ context.Context, _ string) ([]config.CHCo
 	return nil, nil
 }
 
+func (m *mockCHChecker) SetTableBatch(_ string, _ int, _ time.Duration) {}
+
+func (m *mockCHChecker) GetTableBatchConfig(_ string) (int, time.Duration) { return 0, 0 }
+
 func main() {
 	running := map[string]bool{
 		"chat.messages":                 true,

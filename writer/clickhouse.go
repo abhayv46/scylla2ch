@@ -99,6 +99,13 @@ type pendingRow struct {
 //
 // This pattern matches PeerDB and Debezium: a bounded buffer between reader and writer
 // provides natural back-pressure when ClickHouse is slower than the CDC source.
+// tableBatchOverride holds per-table batch settings (like Kafka per-topic consumer config).
+// Zero values mean "use global default".
+type tableBatchOverride struct {
+	Size     int
+	Interval time.Duration
+}
+
 type ClickHouseWriter struct {
 	conn   clickhouse.Conn
 	logger *log.Logger
@@ -108,6 +115,12 @@ type ClickHouseWriter struct {
 	// Per-table channels: lazy-created, each gets its own writer goroutine.
 	tables   map[string]chan pendingRow
 	tablesMu sync.RWMutex // protects the tables map only (not the data path)
+
+	// Per-table batch overrides (like Kafka per-topic consumer config).
+	// High-throughput tables (chat.messages ~100 msg/s) get smaller batch + shorter interval.
+	// Low-throughput tables (frnddit.* ~0 msg/s) get larger batch + longer interval.
+	tableBatchCfgs   map[string]tableBatchOverride
+	tableBatchCfgsMu sync.RWMutex
 
 	wg     sync.WaitGroup
 	stopCh chan struct{}
@@ -159,18 +172,61 @@ func NewClickHouseWriter(cfg config.ClickHouseConfig, batchCfg config.BatchConfi
 	}
 
 	return &ClickHouseWriter{
-		conn:   conn,
-		logger: logger,
-		tables: make(map[string]chan pendingRow),
-		cfg:    batchCfg,
-		db:     cfg.Database,
-		stopCh: make(chan struct{}),
+		conn:           conn,
+		logger:         logger,
+		tables:         make(map[string]chan pendingRow),
+		tableBatchCfgs: make(map[string]tableBatchOverride),
+		cfg:            batchCfg,
+		db:             cfg.Database,
+		stopCh:         make(chan struct{}),
 	}, nil
 }
 
 // Conn returns the underlying ClickHouse connection (for auto-create DDL).
 func (w *ClickHouseWriter) Conn() clickhouse.Conn {
 	return w.conn
+}
+
+// SetTableBatch sets per-table batch override (like Kafka per-topic consumer config).
+// Call before Add() for the table — channel buffer is sized at creation time.
+// Thread-safe: can be called from dashboard hot-reload or SIGHUP handler.
+func (w *ClickHouseWriter) SetTableBatch(table string, size int, interval time.Duration) {
+	w.tableBatchCfgsMu.Lock()
+	w.tableBatchCfgs[table] = tableBatchOverride{Size: size, Interval: interval}
+	w.tableBatchCfgsMu.Unlock()
+	w.logger.Printf("per-table batch config set: table=%s batch_size=%d batch_interval=%v", table, size, interval)
+}
+
+// getTableBatch returns batch size and interval for a table.
+// Uses per-table override if set, otherwise global config.
+func (w *ClickHouseWriter) getTableBatch(table string) (int, time.Duration) {
+	w.tableBatchCfgsMu.RLock()
+	o, ok := w.tableBatchCfgs[table]
+	w.tableBatchCfgsMu.RUnlock()
+
+	size := w.cfg.Size
+	interval := w.cfg.Interval
+	if ok {
+		if o.Size > 0 {
+			size = o.Size
+		}
+		if o.Interval > 0 {
+			interval = o.Interval
+		}
+	}
+	return size, interval
+}
+
+// GetTableBatchConfig returns the per-table batch override for a table (for dashboard display).
+// Returns (0, 0) if no override set (using global defaults).
+func (w *ClickHouseWriter) GetTableBatchConfig(table string) (int, time.Duration) {
+	w.tableBatchCfgsMu.RLock()
+	o, ok := w.tableBatchCfgs[table]
+	w.tableBatchCfgsMu.RUnlock()
+	if !ok {
+		return 0, 0
+	}
+	return o.Size, o.Interval
 }
 
 // Add sends a row to the per-table channel. Lock-free on the hot path.
@@ -226,14 +282,17 @@ func (w *ClickHouseWriter) getOrCreateChan(table string) chan pendingRow {
 		return nil
 	}
 
-	// Buffer = 2x batch size: one batch of headroom before back-pressure kicks in
-	bufSize := w.cfg.Size * 2
+	// Per-table batch config (like Kafka per-topic consumer config)
+	batchSize, batchInterval := w.getTableBatch(table)
+
+	// Buffer = 2x per-table batch size: one batch of headroom before back-pressure kicks in
+	bufSize := batchSize * 2
 	ch = make(chan pendingRow, bufSize)
 	w.tables[table] = ch
 
 	w.wg.Add(1)
-	go w.tableWriter(table, ch)
-	w.logger.Printf("started writer goroutine for table=%s channel_buf=%d", table, bufSize)
+	go w.tableWriter(table, ch, batchSize, batchInterval)
+	w.logger.Printf("started writer goroutine for table=%s batch_size=%d batch_interval=%v channel_buf=%d", table, batchSize, batchInterval, bufSize)
 
 	return ch
 }
@@ -248,18 +307,18 @@ func (w *ClickHouseWriter) getOrCreateChan(table string) chan pendingRow {
 //   - Checkpoint NOT advanced (onFlush never called) → CDC will re-read on restart
 //   - When table appears → flush succeeds → onFlush fires → checkpoint advances → resume
 //   - No OOM: total memory per waiting table ≤ 3 × batch_size × avg_row_bytes
-func (w *ClickHouseWriter) tableWriter(table string, ch chan pendingRow) {
+func (w *ClickHouseWriter) tableWriter(table string, ch chan pendingRow, batchSize int, batchInterval time.Duration) {
 	defer w.wg.Done()
 
-	buf := make([]pendingRow, 0, w.cfg.Size)
-	ticker := time.NewTicker(w.cfg.Interval)
+	buf := make([]pendingRow, 0, batchSize)
+	ticker := time.NewTicker(batchInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case pr := <-ch:
 			buf = append(buf, pr)
-			if len(buf) >= w.cfg.Size {
+			if len(buf) >= batchSize {
 				if !w.flushWithTableWait(table, buf, ch) {
 					return // shutdown
 				}

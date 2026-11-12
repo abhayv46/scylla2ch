@@ -141,6 +141,13 @@ type TableConfig struct {
 	Keyspace           string        `yaml:"keyspace,omitempty"` // explicit keyspace — avoids cross-product with all keyspaces
 	Routes             []RouteConfig `yaml:"routes,omitempty"`
 	SkipColumns        []string      `yaml:"skip_columns,omitempty"`
+
+	// Per-table batch overrides (0 = use global batch config).
+	// Like Kafka consumer per-topic configs: high-throughput tables flush more often,
+	// low-throughput tables can batch longer to reduce ClickHouse INSERT overhead.
+	BatchSize     int           `yaml:"batch_size,omitempty"`     // rows per flush (0 = global)
+	BatchInterval time.Duration `yaml:"batch_interval,omitempty"` // flush timer (0 = global)
+
 	skipColumnsMap     map[string]bool // cached O(1) lookup, built on first IsColumnSkipped call
 	skipColumnsMapOnce sync.Once
 }
@@ -332,10 +339,10 @@ func Load(path string) (*Config, error) {
 
 	// Defaults
 	if cfg.Batch.Size == 0 {
-		cfg.Batch.Size = 10000
+		cfg.Batch.Size = 500
 	}
 	if cfg.Batch.Interval == 0 {
-		cfg.Batch.Interval = 5 * time.Second
+		cfg.Batch.Interval = 1 * time.Second
 	}
 	if cfg.Batch.RetryMax == 0 {
 		cfg.Batch.RetryMax = 3

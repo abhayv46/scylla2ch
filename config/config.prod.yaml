@@ -62,8 +62,8 @@ cdc:
   checkpoint_interval: "60s"       # progress checkpoint frequency
 
 batch:
-  size: 10000                      # flush at 10K rows
-  interval: "2s"                   # or every 2s (whichever first)
+  size: 500                        # global default: flush at 500 rows (per-table override via dashboard)
+  interval: "1s"                   # global default: flush every 1s (per-table override via dashboard)
   retry_max: 3                     # 4 total attempts
   retry_backoff: "500ms"           # exponential: 500ms, 1s, 2s, 4s
 

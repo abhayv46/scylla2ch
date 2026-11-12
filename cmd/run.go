@@ -420,6 +420,10 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		factory.SetKeyspaceDB(s.keyspace, s.chDB)
 	}
 
+	// Apply per-table batch overrides (like Kafka per-topic consumer config).
+	// Each table can have its own batch_size and batch_interval in config.
+	applyTableBatchConfigs(cfg, chWriter, sessions, logger)
+
 	var (
 		readerWg      sync.WaitGroup                    // tracks all reader goroutines
 		readerCancels = make(map[string]context.CancelFunc) // per-table cancel for stop-on-remove
@@ -1018,6 +1022,16 @@ func reloadConfig(
 		}
 	}
 
+	// Re-apply per-table batch configs from new config (like Kafka consumer group reload)
+	reloadSessions := make([]ksState, 0, len(sessionMap))
+	sessionMu.RLock()
+	for ks, sess := range sessionMap {
+		chDB := chDBMap[ks]
+		reloadSessions = append(reloadSessions, ksState{keyspace: ks, session: sess, chDB: chDB})
+	}
+	sessionMu.RUnlock()
+	applyTableBatchConfigs(newCfg, chWriter, reloadSessions, logger)
+
 	// Start readers for new tables only
 	started := 0
 	for _, fqn := range newTables {
@@ -1116,4 +1130,49 @@ func reloadConfig(
 	total := len(*running)
 	runningMu.Unlock()
 	logger.Printf("SIGHUP reload complete: started %d, stopped %d, %d tables total", started, stopped, total)
+}
+
+// applyTableBatchConfigs reads per-table batch overrides from config and sets them on the writer.
+// Like Kafka per-topic consumer config: each table can have different batch_size and batch_interval.
+func applyTableBatchConfigs(cfg *config.Config, chWriter *writer.ClickHouseWriter, sessions []ksState, logger *log.Logger) {
+	for i := range cfg.Tables.Explicit {
+		tc := &cfg.Tables.Explicit[i]
+		if tc.BatchSize == 0 && tc.BatchInterval == 0 {
+			continue // no override — use global defaults
+		}
+
+		// Build qualified names for this table (same logic as TableNames)
+		var qualifiedNames []string
+		if tc.Keyspace != "" {
+			qualifiedNames = append(qualifiedNames, fmt.Sprintf("%s.%s", tc.Keyspace, tc.Name))
+		} else {
+			for _, s := range sessions {
+				qualifiedNames = append(qualifiedNames, fmt.Sprintf("%s.%s", s.keyspace, tc.Name))
+			}
+		}
+
+		// Determine ClickHouse qualified name (database.table) for the writer
+		for _, fqn := range qualifiedNames {
+			parts := strings.SplitN(fqn, ".", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			keyspace, tableName := parts[0], parts[1]
+			chDB := keyspace
+			// Single-keyspace backward compat
+			if len(sessions) == 1 && cfg.ClickHouse.Database != "" {
+				chDB = cfg.ClickHouse.Database
+			} else {
+				// Check session map for explicit mapping
+				for _, s := range sessions {
+					if s.keyspace == keyspace {
+						chDB = s.chDB
+						break
+					}
+				}
+			}
+			chTable := fmt.Sprintf("%s.%s", chDB, tableName)
+			chWriter.SetTableBatch(chTable, tc.BatchSize, tc.BatchInterval)
+		}
+	}
 }

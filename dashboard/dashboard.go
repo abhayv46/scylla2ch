@@ -46,6 +46,8 @@ var indexHTML embed.FS
 type CHTableChecker interface {
 	TableExists(ctx context.Context, table string) (bool, error)
 	TableColumns(ctx context.Context, table string) ([]config.CHColumn, error)
+	SetTableBatch(table string, size int, interval time.Duration)
+	GetTableBatchConfig(table string) (int, time.Duration)
 }
 
 // State holds references to live process state for the JSON API.
@@ -367,12 +369,33 @@ func NewMux(s *State) http.Handler {
 				ks = parts[0]
 				tbl = parts[1]
 			}
-			tables = append(tables, map[string]interface{}{
+			entry := map[string]interface{}{
 				"name":     tbl,
 				"keyspace": ks,
 				"fqn":      name,
 				"active":   active,
-			})
+			}
+			// Include per-table batch config if set
+			if s.CHChecker != nil {
+				// Build CH qualified name to look up batch config
+				chDB := ks
+				if s.SessionMu != nil {
+					s.SessionMu.RLock()
+					if mapped := s.CHDBMap[ks]; mapped != "" {
+						chDB = mapped
+					}
+					s.SessionMu.RUnlock()
+				}
+				chFQN := chDB + "." + tbl
+				bs, bi := s.CHChecker.GetTableBatchConfig(chFQN)
+				if bs > 0 {
+					entry["batch_size"] = bs
+				}
+				if bi > 0 {
+					entry["batch_interval"] = bi.String()
+				}
+			}
+			tables = append(tables, entry)
 		}
 		s.RunningMu.Unlock()
 
@@ -663,8 +686,10 @@ func NewMux(s *State) http.Handler {
 
 func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	var req struct {
-		Name    string `json:"name"`
-		CHTable string `json:"ch_table"` // optional: ClickHouse target (fully-qualified like chat.pending_rooms)
+		Name          string `json:"name"`
+		CHTable       string `json:"ch_table"`       // optional: ClickHouse target (fully-qualified like chat.pending_rooms)
+		BatchSize     int    `json:"batch_size"`      // optional: per-table batch size (0 = global default)
+		BatchInterval string `json:"batch_interval"`  // optional: per-table flush interval e.g. "5s" (empty = global default)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid JSON"})
@@ -674,6 +699,25 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	req.CHTable = strings.TrimSpace(req.CHTable)
 	if req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "name is required"})
+		return
+	}
+
+	// Parse per-table batch config (like Kafka per-topic consumer config)
+	var batchInterval time.Duration
+	if req.BatchInterval != "" {
+		var parseErr error
+		batchInterval, parseErr = time.ParseDuration(req.BatchInterval)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": fmt.Sprintf("invalid batch_interval: %v (use e.g. '5s', '500ms')", parseErr)})
+			return
+		}
+		if batchInterval < 100*time.Millisecond {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "batch_interval must be >= 100ms"})
+			return
+		}
+	}
+	if req.BatchSize < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "batch_size must be >= 0"})
 		return
 	}
 
@@ -894,7 +938,7 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	if chFullyQualified || chTarget != configName {
 		routeTarget = chTarget
 	}
-	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget, cdcKeyspace); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget, cdcKeyspace, req.BatchSize, batchInterval); err != nil {
 		s.Logger.Printf("dashboard: add table %s: %v", configName, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -902,9 +946,16 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 
 	// Sync in-memory config so duplicate check stays accurate
 	s.Config.Tables.Explicit = append(s.Config.Tables.Explicit, config.TableConfig{
-		Name:     configName,
-		Keyspace: cdcKeyspace,
+		Name:          configName,
+		Keyspace:      cdcKeyspace,
+		BatchSize:     req.BatchSize,
+		BatchInterval: batchInterval,
 	})
+
+	// Set per-table batch config on the writer (takes effect when writer goroutine starts)
+	if s.CHChecker != nil && (req.BatchSize > 0 || batchInterval > 0) {
+		s.CHChecker.SetTableBatch(chFQN, req.BatchSize, batchInterval)
+	}
 
 	// Self-SIGHUP to reload — zero downtime, new reader starts immediately
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
@@ -931,7 +982,7 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	if err := modifyConfigTables(s.ConfigFile, name, false, "", ""); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, name, false, "", "", 0, 0); err != nil {
 		s.Logger.Printf("dashboard: remove table %s: %v", name, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -982,7 +1033,7 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 // modifyConfigTables reads the config YAML, adds or removes a table from tables.explicit, writes back.
 // routeTarget is the ClickHouse table name when it differs from the ScyllaDB table name (empty = same name).
 // keyspace is the ScyllaDB keyspace for this table (stored per-table to avoid cross-product).
-func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string, keyspace string) error {
+func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string, keyspace string, batchSize int, batchInterval time.Duration) error {
 	configFileMu.Lock()
 	defer configFileMu.Unlock()
 
@@ -1066,6 +1117,19 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 			entryContent = append(entryContent,
 				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "routes"},
 				routesSeq,
+			)
+		}
+		// Per-table batch config (like Kafka per-topic consumer config)
+		if batchSize > 0 {
+			entryContent = append(entryContent,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "batch_size"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: fmt.Sprintf("%d", batchSize)},
+			)
+		}
+		if batchInterval > 0 {
+			entryContent = append(entryContent,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "batch_interval"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: batchInterval.String()},
 			)
 		}
 		entry := &yaml.Node{
