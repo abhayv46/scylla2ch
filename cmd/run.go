@@ -499,6 +499,10 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		readerCancels[tableName] = readerCancel
 		readerMu.Unlock()
 
+		// Unblock SaveProgress for this table now that the new reader is set up.
+		// ClearTable blocked it to prevent the old reader's End() from restoring stale progress.
+		filePM.UnblockTable(tableName)
+
 		logger.Printf("starting CDC reader for %s", tableName)
 		readerWg.Add(1)
 		go func(tblName string) {
