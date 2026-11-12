@@ -458,6 +458,13 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			filePM.ClearTable(tableName)
 		}
 
+		// Re-read config to pick up per-table settings added by dashboard/SIGHUP.
+		// The startup `cfg` doesn't know about tables added later via dashboard.
+		currentCfg := cfg
+		if freshCfg, loadErr := config.Load(cfgFile); loadErr == nil {
+			currentCfg = freshCfg
+		}
+
 		// Per-reader context: canceled on table remove OR global shutdown
 		readerCtx, readerCancel := context.WithCancel(ctx)
 
@@ -468,9 +475,9 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			ProgressManager:       progressMgr,
 			Logger:                logger,
 			Advanced: scyllacdc.AdvancedReaderConfig{
-				ConfidenceWindowSize:   cfg.CDC.ConfidenceWindow,
-				QueryTimeWindowSize:    cfg.CDC.QueryWindow,
-				ChangeAgeLimit:         tableChangeAgeLimit(cfg, tableName),
+				ConfidenceWindowSize:   currentCfg.CDC.ConfidenceWindow,
+				QueryTimeWindowSize:    currentCfg.CDC.QueryWindow,
+				ChangeAgeLimit:         tableChangeAgeLimit(currentCfg, tableName),
 				PostEmptyQueryDelay:    1 * time.Second,
 				PostNonEmptyQueryDelay: 1 * time.Second,
 			},
