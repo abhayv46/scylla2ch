@@ -411,6 +411,10 @@ func NewMux(s *State) http.Handler {
 					entry["batch_interval"] = bi.String()
 				}
 			}
+			// Include per-table change_age_limit if set
+			if tc := s.Config.GetTableConfig(tbl); tc != nil && tc.ChangeAgeLimit > 0 {
+				entry["change_age_limit"] = tc.ChangeAgeLimit.String()
+			}
 			tables = append(tables, entry)
 		}
 		s.RunningMu.Unlock()
@@ -702,10 +706,11 @@ func NewMux(s *State) http.Handler {
 
 func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	var req struct {
-		Name          string `json:"name"`
-		CHTable       string `json:"ch_table"`       // optional: ClickHouse target (fully-qualified like chat.pending_rooms)
-		BatchSize     int    `json:"batch_size"`      // optional: per-table batch size (0 = global default)
-		BatchInterval string `json:"batch_interval"`  // optional: per-table flush interval e.g. "5s" (empty = global default)
+		Name           string `json:"name"`
+		CHTable        string `json:"ch_table"`        // optional: ClickHouse target (fully-qualified like chat.pending_rooms)
+		BatchSize      int    `json:"batch_size"`       // optional: per-table batch size (0 = global default)
+		BatchInterval  string `json:"batch_interval"`   // optional: per-table flush interval e.g. "5s" (empty = global default)
+		ChangeAgeLimit string `json:"change_age_limit"` // optional: how far back to read on first start e.g. "10s", "1h", "8h" (empty = global default)
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid JSON"})
@@ -744,6 +749,23 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	if req.BatchSize < 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "batch_size must be >= 0"})
 		return
+	}
+
+	// Parse per-table CDC age limit (how far back to read on first start).
+	// Default "10s" = start from ~now (covers confidence window).
+	// Without a per-table override, the global default (8h) would replay old history.
+	changeAgeLimit := 10 * time.Second
+	if req.ChangeAgeLimit != "" {
+		var parseErr error
+		changeAgeLimit, parseErr = time.ParseDuration(req.ChangeAgeLimit)
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": fmt.Sprintf("invalid change_age_limit: %v (use e.g. '10s', '1h', '8h')", parseErr)})
+			return
+		}
+		if changeAgeLimit < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "change_age_limit must be >= 0"})
+			return
+		}
 	}
 
 	// Parse ScyllaDB input: accept "keyspace.table" or just "table"
@@ -963,7 +985,7 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	if chFullyQualified || chTarget != configName {
 		routeTarget = chTarget
 	}
-	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget, cdcKeyspace, req.BatchSize, batchInterval); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, configName, true, routeTarget, cdcKeyspace, req.BatchSize, batchInterval, changeAgeLimit); err != nil {
 		s.Logger.Printf("dashboard: add table %s: %v", configName, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -971,10 +993,11 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 
 	// Sync in-memory config so duplicate check stays accurate
 	s.Config.Tables.Explicit = append(s.Config.Tables.Explicit, config.TableConfig{
-		Name:          configName,
-		Keyspace:      cdcKeyspace,
-		BatchSize:     req.BatchSize,
-		BatchInterval: batchInterval,
+		Name:           configName,
+		Keyspace:       cdcKeyspace,
+		BatchSize:      req.BatchSize,
+		BatchInterval:  batchInterval,
+		ChangeAgeLimit: changeAgeLimit,
 	})
 
 	// Set per-table batch config on the writer (takes effect when writer goroutine starts)
@@ -1007,7 +1030,7 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	if err := modifyConfigTables(s.ConfigFile, name, false, "", "", 0, 0); err != nil {
+	if err := modifyConfigTables(s.ConfigFile, name, false, "", "", 0, 0, 0); err != nil {
 		s.Logger.Printf("dashboard: remove table %s: %v", name, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
@@ -1058,7 +1081,7 @@ func handleRemoveTable(w http.ResponseWriter, r *http.Request, s *State) {
 // modifyConfigTables reads the config YAML, adds or removes a table from tables.explicit, writes back.
 // routeTarget is the ClickHouse table name when it differs from the ScyllaDB table name (empty = same name).
 // keyspace is the ScyllaDB keyspace for this table (stored per-table to avoid cross-product).
-func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string, keyspace string, batchSize int, batchInterval time.Duration) error {
+func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget string, keyspace string, batchSize int, batchInterval time.Duration, changeAgeLimit time.Duration) error {
 	configFileMu.Lock()
 	defer configFileMu.Unlock()
 
@@ -1155,6 +1178,12 @@ func modifyConfigTables(cfgFile string, tableName string, add bool, routeTarget 
 			entryContent = append(entryContent,
 				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "batch_interval"},
 				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: batchInterval.String()},
+			)
+		}
+		if changeAgeLimit > 0 {
+			entryContent = append(entryContent,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "change_age_limit"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: changeAgeLimit.String()},
 			)
 		}
 		entry := &yaml.Node{

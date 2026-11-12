@@ -458,7 +458,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			Advanced: scyllacdc.AdvancedReaderConfig{
 				ConfidenceWindowSize:   cfg.CDC.ConfidenceWindow,
 				QueryTimeWindowSize:    cfg.CDC.QueryWindow,
-				ChangeAgeLimit:         cfg.CDC.ChangeAgeLimit,
+				ChangeAgeLimit:         tableChangeAgeLimit(cfg, tableName),
 				PostEmptyQueryDelay:    1 * time.Second,
 				PostNonEmptyQueryDelay: 1 * time.Second,
 			},
@@ -1191,4 +1191,19 @@ func applyTableBatchConfigs(cfg *config.Config, chWriter *writer.ClickHouseWrite
 			chWriter.SetTableBatch(chTable, tc.BatchSize, tc.BatchInterval)
 		}
 	}
+}
+
+// tableChangeAgeLimit returns the per-table CDC age limit, falling back to global.
+// This controls how far back to read on first start (no checkpoint).
+// "10s" = start from ~now, "1h" = last hour, 0 = global default.
+func tableChangeAgeLimit(cfg *config.Config, tableName string) time.Duration {
+	// Strip keyspace prefix: "chat.rooms" → "rooms"
+	shortName := tableName
+	if dot := strings.IndexByte(tableName, '.'); dot >= 0 {
+		shortName = tableName[dot+1:]
+	}
+	if tc := cfg.GetTableConfig(shortName); tc != nil && tc.ChangeAgeLimit > 0 {
+		return tc.ChangeAgeLimit
+	}
+	return cfg.CDC.ChangeAgeLimit
 }

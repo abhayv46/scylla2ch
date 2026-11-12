@@ -240,6 +240,15 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     <input type="text" id="new-ch-table" placeholder="ClickHouse target (leave empty = same name)" data-tip="ClickHouse target table.\nLeave empty to use same name.\nUse database.table for\na different ClickHouse database.">
     <input type="number" id="new-batch-size" placeholder="batch size (default: 500)" min="10" max="100000" style="width:160px" data-tip="Rows per flush for this table.\nHigher = fewer ClickHouse INSERTs.\nDefault: 500 (global).">
     <input type="number" id="new-batch-interval" placeholder="interval ms (default: 1000)" min="100" max="60000" step="100" style="width:170px" data-tip="Flush interval in milliseconds.\nExamples: 500, 1000, 5000, 10000.\nDefault: 1000ms (global).">
+    <select id="new-start-from" style="width:150px" data-tip="How far back to read CDC history\nwhen starting this table.\n'Now' starts from current time.\nCDC data retained for ~24h (TTL).">
+      <option value="">Now (default)</option>
+      <option value="5m">Last 5 min</option>
+      <option value="30m">Last 30 min</option>
+      <option value="1h">Last 1 hour</option>
+      <option value="4h">Last 4 hours</option>
+      <option value="8h">Last 8 hours</option>
+      <option value="24h">Last 24 hours (max CDC TTL)</option>
+    </select>
     <button onclick="addTable()">Stream Table</button>
   </div>
 
@@ -472,6 +481,7 @@ function render() {
           <span class="status-badge ${t.active ? 'running' : 'stopped'}">${t.active ? 'streaming' : 'stopped'}</span>
           <span class="status-badge isolated" data-tip="Each table runs its own CDC reader.\nIf this table errors, other tables\ncontinue streaming independently.">isolated</span>
           ${t.batch_size || t.batch_interval ? `<span class="status-badge" style="background:rgba(56,139,253,0.15);color:var(--blue)" data-tip="Per-table batch config override.\nbatch_size: ${t.batch_size || 'global'}\nbatch_interval: ${t.batch_interval || 'global'}">batch: ${t.batch_size || '?'}/${t.batch_interval || '?'}</span>` : ''}
+          ${t.change_age_limit ? `<span class="status-badge" style="background:rgba(210,153,34,0.15);color:var(--yellow)" data-tip="CDC history window for this table.\nReads this far back on first start\n(when no checkpoint exists).">start: ${t.change_age_limit}</span>` : ''}
         </span>
         <span style="display:flex;align-items:center;gap:0.5rem">
           <button class="remove-btn" style="color:var(--blue);border-color:var(--border)" data-schema="${escAttr(t.fqn)}">schema</button>
@@ -520,11 +530,13 @@ async function addTable() {
   const chTable = $('new-ch-table').value.trim();
   const batchSizeVal = $('new-batch-size').value;
   const batchIntervalVal = $('new-batch-interval').value;
+  const startFromVal = $('new-start-from').value;
   const body = {name};
   if (chTable && chTable !== name) body.ch_table = chTable;
   // Per-table batch config (like Kafka per-topic consumer config)
   if (batchSizeVal && parseInt(batchSizeVal) > 0) body.batch_size = parseInt(batchSizeVal);
   if (batchIntervalVal && parseInt(batchIntervalVal) > 0) body.batch_interval = parseInt(batchIntervalVal) + 'ms';
+  if (startFromVal) body.change_age_limit = startFromVal;
   try {
     const r = await fetch('/api/tables', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -538,7 +550,7 @@ async function addTable() {
     } else {
       toast(d.message || d.error, d.ok);
     }
-    if (d.ok) { $('new-table').value = ''; $('new-ch-table').value = ''; $('new-batch-size').value = ''; $('new-batch-interval').value = ''; setTimeout(refresh, 1000); }
+    if (d.ok) { $('new-table').value = ''; $('new-ch-table').value = ''; $('new-batch-size').value = ''; $('new-batch-interval').value = ''; $('new-start-from').value = ''; setTimeout(refresh, 1000); }
   } catch(e) { toast('Connection error', false); }
 }
 

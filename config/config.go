@@ -146,6 +146,12 @@ type TableConfig struct {
 	BatchSize     int           `yaml:"batch_size,omitempty"`     // rows per flush (0 = global)
 	BatchInterval time.Duration `yaml:"batch_interval,omitempty"` // flush timer (0 = global)
 
+	// Per-table CDC age limit override (0 = use global cdc.change_age_limit).
+	// Controls how far back to read on first start (no checkpoint).
+	// "0s" or omitted = use global default. "10s" = start from ~now. "1h" = last hour.
+	// Max useful value = ScyllaDB CDC TTL (typically 24h, set per-table with ALTER TABLE ... WITH cdc = {'ttl': N}).
+	ChangeAgeLimit time.Duration `yaml:"change_age_limit,omitempty"`
+
 	skipColumnsMap map[string]bool // cached O(1) lookup, built in Load() / buildCaches()
 }
 

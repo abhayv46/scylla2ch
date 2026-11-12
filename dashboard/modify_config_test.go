@@ -47,7 +47,7 @@ health:
 	}
 
 	// Step 1: Add pending_rooms
-	if err := modifyConfigTables(cfgFile, "pending_rooms", true, "", "chat", 0, 0); err != nil {
+	if err := modifyConfigTables(cfgFile, "pending_rooms", true, "", "chat", 0, 0, 0); err != nil {
 		t.Fatalf("add pending_rooms: %v", err)
 	}
 
@@ -56,7 +56,7 @@ health:
 	t.Logf("After adding pending_rooms:\n%s", string(data))
 
 	// Step 2: Add rooms
-	if err := modifyConfigTables(cfgFile, "rooms", true, "", "chat", 0, 0); err != nil {
+	if err := modifyConfigTables(cfgFile, "rooms", true, "", "chat", 0, 0, 0); err != nil {
 		t.Fatalf("add rooms: %v", err)
 	}
 
@@ -64,7 +64,7 @@ health:
 	t.Logf("After adding rooms:\n%s", string(data))
 
 	// Step 3: Remove rooms — THIS IS WHAT FAILS ON PROD
-	if err := modifyConfigTables(cfgFile, "rooms", false, "", "", 0, 0); err != nil {
+	if err := modifyConfigTables(cfgFile, "rooms", false, "", "", 0, 0, 0); err != nil {
 		t.Fatalf("remove rooms: %v", err)
 	}
 
@@ -72,7 +72,7 @@ health:
 	t.Logf("After removing rooms:\n%s", string(data))
 
 	// Verify pending_rooms is still there
-	if err := modifyConfigTables(cfgFile, "pending_rooms", false, "", "", 0, 0); err != nil {
+	if err := modifyConfigTables(cfgFile, "pending_rooms", false, "", "", 0, 0, 0); err != nil {
 		t.Fatalf("remove pending_rooms (verify still exists): %v", err)
 	}
 }
@@ -111,7 +111,7 @@ health:
 	}
 
 	// Try to remove rooms
-	if err := modifyConfigTables(cfgFile, "rooms", false, "", "", 0, 0); err != nil {
+	if err := modifyConfigTables(cfgFile, "rooms", false, "", "", 0, 0, 0); err != nil {
 		t.Fatalf("remove rooms from flow-style: %v", err)
 	}
 
@@ -154,7 +154,7 @@ health:
 	}
 
 	// Try to remove rooms from empty list — should fail with helpful message
-	err := modifyConfigTables(cfgFile, "rooms", false, "", "", 0, 0)
+	err := modifyConfigTables(cfgFile, "rooms", false, "", "", 0, 0, 0)
 	if err == nil {
 		t.Fatal("expected error removing from empty explicit list")
 	}
