@@ -979,13 +979,12 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	// Advance the application start time so the reader starts from now - changeAgeLimit.
-	// Without this, scylla-cdc-go resumes from a stale checkpoint and ignores change_age_limit.
-	// One INSERT — existing running tables are unaffected (their per-stream progress is ahead).
+	// Clear old per-stream checkpoint rows so the reader starts fresh with change_age_limit.
+	// Without this, scylla-cdc-go resumes from the saved per-stream progress and ignores change_age_limit.
+	// Only touches the tiny scylla2ch_progress table (~10 rows per table), not production data.
 	if anySession != nil {
 		progressTable := fmt.Sprintf("%s.%s", cdcKeyspace, config.ProgressTable)
-		startFrom := time.Now().Add(-changeAgeLimit)
-		updateStartTime(anySession, progressTable, startFrom, s.Logger)
+		clearTableCheckpoint(anySession, progressTable, scyllaTable, s.Logger)
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
@@ -1624,24 +1623,41 @@ func quantileFromHistogram(h *dto.Histogram, q float64) float64 {
 	return 0
 }
 
-// updateStartTime writes one row to the progress table's special partition to advance
-// the application read start time. This is a single INSERT (lightest possible write).
-// When the CDC reader starts, it computes readFrom = max(savedGeneration, appStartTime).
-// Existing tables are unaffected — their per-stream progress is already ahead of this time.
-// Only a newly added table (with no per-stream progress) starts from this time.
-func updateStartTime(session *gocql.Session, progressTable string, startFrom time.Time, logger *log.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// clearTableCheckpoint removes per-stream checkpoint rows for a table from the progress table.
+// This forces the CDC reader to start fresh using the configured change_age_limit.
+// The progress table is tiny (~10 rows per table) — this is NOT a production data table.
+// PK is (generation, application_name, table_name, stream_id) — we scan with ALLOW FILTERING
+// because the table has at most a few hundred rows total across all tables.
+func clearTableCheckpoint(session *gocql.Session, progressTable, tableName string, logger *log.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := session.Query(
-		fmt.Sprintf(
-			"INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?, ?)",
-			progressTable,
-		),
-		time.Time{}, "scylla2ch", "", []byte{}, gocql.MinTimeUUID(startFrom),
-	).WithContext(ctx).Exec(); err != nil {
-		logger.Printf("dashboard: update start time table=%s: %v", progressTable, err)
-	} else {
-		logger.Printf("dashboard: set application start time to %v (reader will start from here)", startFrom)
+	iter := session.Query(
+		fmt.Sprintf("SELECT generation, application_name, table_name, stream_id FROM %s WHERE application_name = ? AND table_name = ? ALLOW FILTERING", progressTable),
+		"scylla2ch", tableName,
+	).WithContext(ctx).Iter()
+
+	var (
+		gen     time.Time
+		appName string
+		tbl     string
+		sid     []byte
+		cleared int
+	)
+	for iter.Scan(&gen, &appName, &tbl, &sid) {
+		if err := session.Query(
+			fmt.Sprintf("DELETE FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", progressTable),
+			gen, appName, tbl, sid,
+		).WithContext(ctx).Exec(); err != nil {
+			logger.Printf("dashboard: clear checkpoint table=%s gen=%v: %v", tableName, gen, err)
+		} else {
+			cleared++
+		}
+	}
+	if err := iter.Close(); err != nil {
+		logger.Printf("dashboard: checkpoint scan table=%s: %v", tableName, err)
+	}
+	if cleared > 0 {
+		logger.Printf("dashboard: cleared %d checkpoint rows for table=%s (reader will start fresh with change_age_limit)", cleared, tableName)
 	}
 }
