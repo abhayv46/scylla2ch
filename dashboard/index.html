@@ -209,15 +209,15 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
   </div>
 
   <div class="totals">
-    <div class="total-card" data-tip="CDC rows read from ScyllaDB CDC log tables.\nEach INSERT/UPDATE/DELETE in ScyllaDB\ngenerates a CDC row that scylla2ch reads.">
+    <div class="total-card" data-tip="CDC rows read from ScyllaDB CDC log tables today (IST).\nResets at midnight IST.\nEach INSERT/UPDATE/DELETE in ScyllaDB\ngenerates a CDC row that scylla2ch reads.">
       <div class="label">CDC Rows Read</div>
       <div class="value" id="total-consumed">-</div>
-      <div class="hint">from ScyllaDB CDC logs</div>
+      <div class="hint">today (IST)</div>
     </div>
-    <div class="total-card" data-tip="Rows successfully written (INSERTed) into\nClickHouse. Should closely match Rows Read.\nDifference = in-flight or dropped rows.">
+    <div class="total-card" data-tip="Rows successfully written (INSERTed) into\nClickHouse today (IST). Resets at midnight IST.\nShould closely match Rows Read.\nDifference = in-flight or dropped rows.">
       <div class="label">Rows Written</div>
       <div class="value" id="total-flushed">-</div>
-      <div class="hint">INSERTed into ClickHouse</div>
+      <div class="hint">today (IST)</div>
     </div>
     <div class="total-card" data-tip="CDC stream workers — each table gets multiple\ngoroutines reading different CDC stream\npartitions from ScyllaDB in parallel.">
       <div class="label">CDC Workers</div>
@@ -469,8 +469,8 @@ function render() {
     cfgPanel.style.display = 'none';
   }
 
-  $('total-consumed').textContent = fmt(metricsData.totals.rows_consumed);
-  $('total-flushed').textContent = fmt(metricsData.totals.rows_flushed);
+  $('total-consumed').textContent = fmt(metricsData.totals.daily_consumed || 0);
+  $('total-flushed').textContent = fmt(metricsData.totals.daily_flushed || 0);
   $('total-consumers').textContent = fmt(metricsData.totals.consumers_active);
   $('total-tables').textContent = fmt(metricsData.totals.tables_active);
 
@@ -507,8 +507,8 @@ function render() {
         </span>
       </div>
       <div class="table-metrics">
-        <div class="metric" data-tip="CDC rows read from this table's _scylla_cdc_log.\nEach ScyllaDB write (INSERT/UPDATE/DELETE)\ncreates one CDC log entry."><div class="metric-label">rows read</div><div class="metric-value">${fmt(m.rows_consumed)}</div></div>
-        <div class="metric" data-tip="Rows successfully INSERTed into ClickHouse.\nShould match rows read — difference means\nrows are buffered or were dropped."><div class="metric-label">rows written</div><div class="metric-value">${fmt(m.rows_flushed)}</div></div>
+        <div class="metric" data-tip="CDC rows read today (IST, resets at midnight).\nEach ScyllaDB write (INSERT/UPDATE/DELETE)\ncreates one CDC log entry."><div class="metric-label">rows read</div><div class="metric-value">${fmt(m.daily_consumed || 0)}</div></div>
+        <div class="metric" data-tip="Rows INSERTed into ClickHouse today (IST).\nShould match rows read — difference means\nrows are buffered or were dropped."><div class="metric-label">rows written</div><div class="metric-value">${fmt(m.daily_flushed || 0)}</div></div>
         <div class="metric" data-tip="Rows dropped due to errors (schema mismatch,\nClickHouse rejects, etc). Should be 0.\nIf > 0, check logs for the cause."><div class="metric-label">dropped</div><div class="metric-value ${droppedClass}">${fmt(dropped)}</div></div>
         <div class="metric" data-tip="Rows buffered in memory waiting to be written\nto ClickHouse. Batched for efficiency.\nHigh = ClickHouse writes are slow."><div class="metric-label">write buffer</div><div class="metric-value">${fmt(m.buffer_size)}</div>
           <div class="bar-gauge"><div class="fill" style="width:${bufPct}%;background:${bufColor}"></div></div>

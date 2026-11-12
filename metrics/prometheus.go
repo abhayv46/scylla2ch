@@ -57,6 +57,8 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -64,6 +66,122 @@ import (
 
 	"scylla2ch/config"
 )
+
+// --- Daily counters (reset at midnight IST, for dashboard display) ---
+// These are NOT Prometheus metrics — Prometheus counters stay cumulative.
+// The dashboard shows "today" numbers from these.
+
+var (
+	dailyMu        sync.RWMutex
+	dailyConsumed  = make(map[string]*atomic.Int64) // table → today's consumed
+	dailyFlushed   = make(map[string]*atomic.Int64) // table → today's flushed
+	dailyResetDate string                           // "2006-01-02" in IST
+)
+
+var istLoc = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.FixedZone("IST", 5*3600+30*60)
+	}
+	return loc
+}()
+
+func todayIST() string {
+	return time.Now().In(istLoc).Format("2006-01-02")
+}
+
+// resetIfNewDay checks if the IST date changed and resets daily counters.
+func resetIfNewDay() {
+	today := todayIST()
+	dailyMu.RLock()
+	same := dailyResetDate == today
+	dailyMu.RUnlock()
+	if same {
+		return
+	}
+	dailyMu.Lock()
+	defer dailyMu.Unlock()
+	if dailyResetDate == today {
+		return // another goroutine already reset
+	}
+	for _, c := range dailyConsumed {
+		c.Store(0)
+	}
+	for _, c := range dailyFlushed {
+		c.Store(0)
+	}
+	dailyResetDate = today
+}
+
+func getDailyCounter(m map[string]*atomic.Int64, table string) *atomic.Int64 {
+	dailyMu.RLock()
+	c, ok := m[table]
+	dailyMu.RUnlock()
+	if ok {
+		return c
+	}
+	dailyMu.Lock()
+	defer dailyMu.Unlock()
+	if c, ok = m[table]; ok {
+		return c
+	}
+	c = &atomic.Int64{}
+	m[table] = c
+	if dailyResetDate == "" {
+		dailyResetDate = todayIST()
+	}
+	return c
+}
+
+// IncDailyConsumed increments today's consumed count for a table.
+func IncDailyConsumed(table string) {
+	resetIfNewDay()
+	getDailyCounter(dailyConsumed, table).Add(1)
+}
+
+// IncDailyFlushed increments today's flushed count for a table.
+func IncDailyFlushed(table string, n int64) {
+	resetIfNewDay()
+	getDailyCounter(dailyFlushed, table).Add(n)
+}
+
+// GetDailyConsumed returns today's consumed count for a table.
+func GetDailyConsumed(table string) int64 {
+	resetIfNewDay()
+	dailyMu.RLock()
+	c, ok := dailyConsumed[table]
+	dailyMu.RUnlock()
+	if !ok {
+		return 0
+	}
+	return c.Load()
+}
+
+// GetDailyFlushed returns today's flushed count for a table.
+func GetDailyFlushed(table string) int64 {
+	resetIfNewDay()
+	dailyMu.RLock()
+	c, ok := dailyFlushed[table]
+	dailyMu.RUnlock()
+	if !ok {
+		return 0
+	}
+	return c.Load()
+}
+
+// GetDailyTotals returns today's total consumed and flushed across all tables.
+func GetDailyTotals() (consumed int64, flushed int64) {
+	resetIfNewDay()
+	dailyMu.RLock()
+	defer dailyMu.RUnlock()
+	for _, c := range dailyConsumed {
+		consumed += c.Load()
+	}
+	for _, c := range dailyFlushed {
+		flushed += c.Load()
+	}
+	return
+}
 
 var (
 	// --- Throughput ---

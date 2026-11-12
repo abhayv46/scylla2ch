@@ -37,6 +37,7 @@ import (
 
 	"scylla2ch/config"
 	"scylla2ch/converter"
+	"scylla2ch/metrics"
 )
 
 // FIX M4: Table name validation — only allow safe identifier characters.
@@ -584,12 +585,21 @@ func NewMux(s *State) http.Handler {
 			delete(globalMeta, "heap_alloc_bytes")
 		}
 
+		// Add daily counters per table
+		for tbl, m := range perTable {
+			m["daily_consumed"] = float64(metrics.GetDailyConsumed(tbl))
+			m["daily_flushed"] = float64(metrics.GetDailyFlushed(tbl))
+		}
+
+		dailyConsumed, dailyFlushed := metrics.GetDailyTotals()
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"tables": perTable,
 			"errors": globalMeta,
 			"totals": map[string]interface{}{
 				"rows_consumed":    totalConsumed,
 				"rows_flushed":     totalFlushed,
+				"daily_consumed":   dailyConsumed,
+				"daily_flushed":    dailyFlushed,
 				"consumers_active": consumersActive,
 				"tables_active":    tablesActive,
 				"goroutines":       goroutines,
