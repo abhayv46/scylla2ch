@@ -226,6 +226,14 @@ func (f *FileProgressManager) ClearTable(table string) {
 
 	f.mu.Lock()
 	delete(f.tableProgress, table)
+	// Reset global timestamps so scylla-cdc-go's determineStartTimestamp falls through
+	// to ChangeAgeLimit. Without this, the old appStartTime/generation (set by the
+	// first-ever reader, possibly 8h ago) is returned by GetApplicationReadStartTime /
+	// GetCurrentGeneration, and the library starts from there — ignoring ChangeAgeLimit.
+	// Running readers are unaffected (they don't re-call determineStartTimestamp).
+	// On restart, tables with per-stream progress resume from there regardless.
+	f.generation = time.Time{}
+	f.appStartTime = time.Time{}
 	f.dirty = true
 	f.mu.Unlock()
 
