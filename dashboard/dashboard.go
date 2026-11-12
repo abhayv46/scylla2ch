@@ -979,14 +979,19 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	// Clear old per-stream checkpoint rows so the reader starts fresh with change_age_limit.
-	// Without this, scylla-cdc-go resumes from the saved per-stream progress and ignores change_age_limit.
-	// Only touches the tiny scylla2ch_progress table (~10 rows per table), not production data.
-	// scylla-cdc-go stores table_name as "keyspace.table" (e.g. "chat.first_exchange_lifecycle").
+	// Reset checkpoint so the reader starts fresh with change_age_limit.
+	// Two writes needed:
+	//   1. Clear per-stream progress rows for this table (scylla-cdc-go stores as "keyspace.table")
+	//   2. Update the application start time to now-changeAgeLimit
+	//      (the global current_generation row would otherwise make readFrom = old generation time)
+	// Both together make the reader start from the configured time.
+	// Existing running tables are unaffected — their per-stream progress is current and wins.
 	if anySession != nil {
 		progressTable := fmt.Sprintf("%s.%s", cdcKeyspace, config.ProgressTable)
 		progressTableName := cdcKeyspace + "." + scyllaTable
 		clearTableCheckpoint(anySession, progressTable, progressTableName, s.Logger)
+		startFrom := time.Now().Add(-changeAgeLimit)
+		updateStartTime(anySession, progressTable, startFrom, s.Logger)
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
@@ -1661,5 +1666,26 @@ func clearTableCheckpoint(session *gocql.Session, progressTable, tableName strin
 	}
 	if cleared > 0 {
 		logger.Printf("dashboard: cleared %d checkpoint rows for table=%s (reader will start fresh with change_age_limit)", cleared, tableName)
+	}
+}
+
+// updateStartTime advances the application read start time in the progress table.
+// One INSERT to the special partition. This ensures readFrom = max(generation, appStartTime) = now
+// even if the global current_generation row points to an old topology generation.
+// Existing tables are unaffected — their per-stream progress is current and wins over readFrom.
+func updateStartTime(session *gocql.Session, progressTable string, startFrom time.Time, logger *log.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := session.Query(
+		fmt.Sprintf(
+			"INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?, ?)",
+			progressTable,
+		),
+		time.Time{}, "scylla2ch", "", []byte{}, gocql.MinTimeUUID(startFrom),
+	).WithContext(ctx).Exec(); err != nil {
+		logger.Printf("dashboard: update start time: %v", err)
+	} else {
+		logger.Printf("dashboard: set application start time to %v", startFrom)
 	}
 }
