@@ -444,7 +444,16 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("progress manager for %s: %w", tableName, err)
 		}
 		// Wrap with retry to guard against transient ScyllaDB write failures (scylla-cdc-go#82).
-		progressMgr := &retryProgressManager{inner: baseMgr, maxRetries: 3, backoff: time.Second, logger: logger, tableName: tableName}
+		var progressMgr scyllacdc.ProgressManager
+		progressMgr = &retryProgressManager{inner: baseMgr, maxRetries: 3, backoff: time.Second, logger: logger, tableName: tableName}
+
+		// If dashboard flagged this table for fresh start, wrap the progress manager
+		// to ignore old checkpoints. Zero ScyllaDB writes — purely in-memory bypass.
+		// The flag is consumed (deleted) so next restart uses normal checkpoints.
+		if _, freshStart := dashboard.FreshStartTables.LoadAndDelete(tableName); freshStart {
+			logger.Printf("table=%s flagged for fresh start — ignoring old checkpoints, using ChangeAgeLimit", tableName)
+			progressMgr = &freshStartProgressManager{inner: progressMgr, logger: logger, table: tableName}
+		}
 
 		// Per-reader context: canceled on table remove OR global shutdown
 		readerCtx, readerCancel := context.WithCancel(ctx)
@@ -752,6 +761,39 @@ func (r *retryProgressManager) SaveProgress(ctx context.Context, gen time.Time, 
 	r.logger.Printf("ERROR checkpoint save failed after %d retries table=%s: %v", r.maxRetries+1, table, lastErr)
 	metrics.CheckpointErrorsTotal.WithLabelValues(table).Inc()
 	return lastErr
+}
+
+// freshStartProgressManager wraps a ProgressManager to ignore old checkpoints.
+// Returns zero for all reads (GetCurrentGeneration, GetProgress, GetApplicationReadStartTime),
+// which forces scylla-cdc-go to use ChangeAgeLimit. All saves delegate to the inner manager
+// so normal checkpointing works after the first start. Zero ScyllaDB extra writes.
+type freshStartProgressManager struct {
+	inner  scyllacdc.ProgressManager
+	logger *log.Logger
+	table  string
+}
+
+func (f *freshStartProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
+	f.logger.Printf("fresh-start: table=%s ignoring old generation → using ChangeAgeLimit", f.table)
+	return time.Time{}, nil
+}
+func (f *freshStartProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
+	return f.inner.StartGeneration(ctx, gen)
+}
+func (f *freshStartProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID) (scyllacdc.Progress, error) {
+	return scyllacdc.Progress{}, nil // no saved progress → uses ChangeAgeLimit startFrom
+}
+func (f *freshStartProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID, progress scyllacdc.Progress) error {
+	return f.inner.SaveProgress(ctx, gen, table, streamID, progress)
+}
+func (f *freshStartProgressManager) GetApplicationReadStartTime(ctx context.Context) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (f *freshStartProgressManager) SaveApplicationReadStartTime(ctx context.Context, startTime time.Time) error {
+	if ws, ok := f.inner.(scyllacdc.ProgressManagerWithStartTime); ok {
+		return ws.SaveApplicationReadStartTime(ctx, startTime)
+	}
+	return nil
 }
 
 // sdNotify sends a state string to systemd via the NOTIFY_SOCKET.

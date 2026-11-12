@@ -43,6 +43,11 @@ import (
 // Prevents YAML injection or filesystem issues from malicious table names.
 var validTableName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+// FreshStartTables tracks tables that should ignore old checkpoints on next reader start.
+// Set by dashboard (add table), read by cmd/run.go (startReader), cleared after use.
+// Zero ScyllaDB writes — purely in-memory. Key = "keyspace.table", value = true.
+var FreshStartTables sync.Map
+
 //go:embed index.html
 var indexHTML embed.FS
 
@@ -979,18 +984,9 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	// Reset checkpoint so the reader starts fresh with change_age_limit.
-	// Two writes needed:
-	//   1. Clear per-stream progress rows for this table (scylla-cdc-go stores as "keyspace.table")
-	//   2. Update the application start time to now-changeAgeLimit
-	//      (the global current_generation row would otherwise make readFrom = old generation time)
-	// Both together make the reader start from the configured time.
-	// Existing running tables are unaffected — their per-stream progress is current and wins.
-	if anySession != nil {
-		progressTable := fmt.Sprintf("%s.%s", cdcKeyspace, config.ProgressTable)
-		progressTableName := cdcKeyspace + "." + scyllaTable
-		clearTableCheckpoint(anySession, progressTable, progressTableName, s.Logger)
-	}
+	// Mark this table for fresh start — the reader will ignore old checkpoints
+	// and use ChangeAgeLimit instead. Zero ScyllaDB writes — purely in-memory.
+	FreshStartTables.Store(cdcKeyspace+"."+scyllaTable, true)
 
 	// Both CDC + ClickHouse table verified — save to config
 	// If CH target differs from ScyllaDB table name, store as route
@@ -1628,56 +1624,4 @@ func quantileFromHistogram(h *dto.Histogram, q float64) float64 {
 	return 0
 }
 
-// clearTableCheckpoint removes per-stream checkpoint rows for a table from the progress table.
-// This forces the CDC reader to start fresh using the configured change_age_limit.
-// The progress table is tiny (~10 rows per table) — this is NOT a production data table.
-// PK is (generation, application_name, table_name, stream_id) — we scan with ALLOW FILTERING
-// because the table has at most a few hundred rows total across all tables.
-func clearTableCheckpoint(session *gocql.Session, progressTable, tableName string, logger *log.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// 1. Clear per-stream progress rows for this table
-	iter := session.Query(
-		fmt.Sprintf("SELECT generation, application_name, table_name, stream_id FROM %s WHERE application_name = ? AND table_name = ? ALLOW FILTERING", progressTable),
-		"scylla2ch", tableName,
-	).WithContext(ctx).Iter()
-
-	var (
-		gen     time.Time
-		appName string
-		tbl     string
-		sid     []byte
-		cleared int
-	)
-	for iter.Scan(&gen, &appName, &tbl, &sid) {
-		if err := session.Query(
-			fmt.Sprintf("DELETE FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", progressTable),
-			gen, appName, tbl, sid,
-		).WithContext(ctx).Exec(); err != nil {
-			logger.Printf("dashboard: clear checkpoint table=%s gen=%v: %v", tableName, gen, err)
-		} else {
-			cleared++
-		}
-	}
-	if err := iter.Close(); err != nil {
-		logger.Printf("dashboard: checkpoint scan table=%s: %v", tableName, err)
-	}
-
-	// 2. Clear the global generation + start time row (special partition).
-	//    PK: (generation=zero-time, application_name="scylla2ch", table_name="", stream_id=empty).
-	//    This forces scylla-cdc-go to use ChangeAgeLimit on next reader start.
-	//    Safe: existing running tables are unaffected (they already have their reader running
-	//    and only re-read the generation on restart, at which point they re-save it).
-	if err := session.Query(
-		fmt.Sprintf("DELETE FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", progressTable),
-		time.Time{}, "scylla2ch", "", []byte{},
-	).WithContext(ctx).Exec(); err != nil {
-		logger.Printf("dashboard: clear generation row: %v", err)
-	} else {
-		cleared++
-	}
-
-	logger.Printf("dashboard: cleared %d checkpoint rows for table=%s (reader will start fresh)", cleared, tableName)
-}
 
