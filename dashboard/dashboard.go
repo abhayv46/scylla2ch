@@ -81,6 +81,13 @@ type State struct {
 	// StopTable cancels the CDC reader for a table and removes it from Running.
 	// Set by cmd/run.go — nil means stop-on-remove is not supported (falls back to restart).
 	StopTable func(fqn string) bool
+
+	// ProgressManager is the file-based checkpoint manager.
+	// Used by dashboard to clear table checkpoints on fresh start.
+	ProgressManager interface {
+		ClearTable(table string)
+		TableCount() int
+	}
 }
 
 // session store — token → {expiry, role}
@@ -984,9 +991,13 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
-	// Mark this table for fresh start — the reader will ignore old checkpoints
-	// and use ChangeAgeLimit instead. Zero ScyllaDB writes — purely in-memory.
-	FreshStartTables.Store(cdcKeyspace+"."+scyllaTable, true)
+	// Clear checkpoint for this table so the reader starts fresh using ChangeAgeLimit.
+	// Uses file-based progress manager if available, falls back to in-memory flag.
+	tableFQN := cdcKeyspace + "." + scyllaTable
+	if s.ProgressManager != nil {
+		s.ProgressManager.ClearTable(tableFQN)
+	}
+	FreshStartTables.Store(tableFQN, true)
 
 	// Both CDC + ClickHouse table verified — save to config
 	// If CH target differs from ScyllaDB table name, store as route

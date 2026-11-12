@@ -113,6 +113,7 @@ type CDCConfig struct {
 	QueryWindow        time.Duration `yaml:"query_window"`
 	ChangeAgeLimit     time.Duration `yaml:"change_age_limit"`
 	CheckpointInterval time.Duration `yaml:"checkpoint_interval"`
+	CheckpointFile     string        `yaml:"checkpoint_file"` // local file for checkpoints (default: /etc/scylla2ch/checkpoints.json)
 }
 
 type BatchConfig struct {
@@ -378,7 +379,10 @@ func Load(path string) (*Config, error) {
 		cfg.CDC.ChangeAgeLimit = 8 * time.Hour
 	}
 	if cfg.CDC.CheckpointInterval == 0 {
-		cfg.CDC.CheckpointInterval = 60 * time.Second
+		cfg.CDC.CheckpointInterval = 1 * time.Hour
+	}
+	if cfg.CDC.CheckpointFile == "" {
+		cfg.CDC.CheckpointFile = "/etc/scylla2ch/checkpoints.json"
 	}
 	if cfg.Metrics.Port == 0 {
 		cfg.Metrics.Port = 9090

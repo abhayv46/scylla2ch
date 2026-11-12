@@ -53,6 +53,7 @@ import (
 	"scylla2ch/converter"
 	"scylla2ch/dashboard"
 	"scylla2ch/metrics"
+	"scylla2ch/progress"
 	"scylla2ch/writer"
 )
 
@@ -428,6 +429,16 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	// Each table can have its own batch_size and batch_interval in config.
 	applyTableBatchConfigs(cfg, chWriter, sessions, logger)
 
+	// File-based checkpoint manager — replaces ScyllaDB progress table.
+	// Zero ScyllaDB writes for checkpoints. One entry per table, flushed periodically to local disk (EBS).
+	// On restart: read file → replay max checkpoint_interval of CDC data → ClickHouse dedup handles it.
+	filePM, err := progress.NewFileProgressManager(cfg.CDC.CheckpointFile, cfg.CDC.CheckpointInterval, logger)
+	if err != nil {
+		return fmt.Errorf("file progress manager: %w", err)
+	}
+	defer filePM.Stop() // final flush on shutdown
+	dashState.ProgressManager = filePM
+
 	var (
 		readerWg      sync.WaitGroup                    // tracks all reader goroutines
 		readerCancels = make(map[string]context.CancelFunc) // per-table cancel for stop-on-remove
@@ -435,24 +446,16 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	)
 
 	// startReader launches a CDC reader goroutine for one table.
-	// Each table uses the session for its keyspace and its own progress table.
+	// Uses the shared file-based progress manager (zero ScyllaDB checkpoint writes).
 	// The reader gets a per-table context so it can be stopped individually.
 	startReader := func(sess *gocql.Session, keyspace, tableName string) error {
-		progressTable := fmt.Sprintf("%s.%s", keyspace, config.ProgressTable)
-		baseMgr, err := scyllacdc.NewTableBackedProgressManager(sess, progressTable, "scylla2ch")
-		if err != nil {
-			return fmt.Errorf("progress manager for %s: %w", tableName, err)
-		}
-		// Wrap with retry to guard against transient ScyllaDB write failures (scylla-cdc-go#82).
-		var progressMgr scyllacdc.ProgressManager
-		progressMgr = &retryProgressManager{inner: baseMgr, maxRetries: 3, backoff: time.Second, logger: logger, tableName: tableName}
+		var progressMgr scyllacdc.ProgressManager = filePM
 
-		// If dashboard flagged this table for fresh start, wrap the progress manager
-		// to ignore old checkpoints. Zero ScyllaDB writes — purely in-memory bypass.
-		// The flag is consumed (deleted) so next restart uses normal checkpoints.
+		// If dashboard flagged this table for fresh start, clear its checkpoint
+		// so the reader uses ChangeAgeLimit instead of old progress.
 		if _, freshStart := dashboard.FreshStartTables.LoadAndDelete(tableName); freshStart {
-			logger.Printf("table=%s flagged for fresh start — ignoring old checkpoints, using ChangeAgeLimit", tableName)
-			progressMgr = &freshStartProgressManager{inner: progressMgr, logger: logger, table: tableName}
+			logger.Printf("table=%s flagged for fresh start — clearing checkpoint, using ChangeAgeLimit", tableName)
+			filePM.ClearTable(tableName)
 		}
 
 		// Per-reader context: canceled on table remove OR global shutdown
@@ -707,92 +710,6 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	readerWg.Wait()
 
 	logger.Printf("shutdown complete — all readers stopped")
-	return nil
-}
-
-// retryProgressManager wraps a scyllacdc.ProgressManager to add retry logic
-// on SaveProgress failures (upstream scylla-cdc-go#82: no built-in retry).
-type retryProgressManager struct {
-	inner      scyllacdc.ProgressManager
-	maxRetries int
-	backoff    time.Duration
-	logger     *log.Logger
-	tableName  string // for CDC gap detection metrics
-}
-
-func (r *retryProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
-	return r.inner.GetCurrentGeneration(ctx)
-}
-func (r *retryProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
-	return r.inner.StartGeneration(ctx, gen)
-}
-func (r *retryProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID) (scyllacdc.Progress, error) {
-	progress, err := r.inner.GetProgress(ctx, gen, table, streamID)
-	if err == nil {
-		// CDC gap detection (P0-2): if the saved checkpoint is very old, the CDC log
-		// may have been TTL-expired. scylla-cdc-go will silently skip ahead.
-		// Log a warning and emit a metric so operators know data was lost.
-		checkpointTime := progress.LastProcessedRecordTime.Time()
-		if !checkpointTime.IsZero() {
-			age := time.Since(checkpointTime)
-			if age > 20*time.Hour { // CDC TTL is typically 24h; warn at 20h
-				r.logger.Printf("WARNING CDC gap detected table=%s: checkpoint is %.0f hours old — CDC log entries older than TTL (24h) are lost", r.tableName, age.Hours())
-				metrics.CDCGapSeconds.WithLabelValues(r.tableName).Set(age.Seconds())
-				metrics.ErrorsTotal.WithLabelValues("cdc_gap", "critical").Inc()
-			}
-		}
-	}
-	return progress, err
-}
-func (r *retryProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID, progress scyllacdc.Progress) error {
-	var lastErr error
-	for attempt := 0; attempt <= r.maxRetries; attempt++ {
-		lastErr = r.inner.SaveProgress(ctx, gen, table, streamID, progress)
-		if lastErr == nil {
-			return nil
-		}
-		if ctx.Err() != nil {
-			return lastErr // context cancelled, don't retry
-		}
-		if attempt < r.maxRetries {
-			time.Sleep(r.backoff * time.Duration(attempt+1))
-		}
-	}
-	r.logger.Printf("ERROR checkpoint save failed after %d retries table=%s: %v", r.maxRetries+1, table, lastErr)
-	metrics.CheckpointErrorsTotal.WithLabelValues(table).Inc()
-	return lastErr
-}
-
-// freshStartProgressManager wraps a ProgressManager to ignore old checkpoints.
-// Returns zero for all reads (GetCurrentGeneration, GetProgress, GetApplicationReadStartTime),
-// which forces scylla-cdc-go to use ChangeAgeLimit. All saves delegate to the inner manager
-// so normal checkpointing works after the first start. Zero ScyllaDB extra writes.
-type freshStartProgressManager struct {
-	inner  scyllacdc.ProgressManager
-	logger *log.Logger
-	table  string
-}
-
-func (f *freshStartProgressManager) GetCurrentGeneration(ctx context.Context) (time.Time, error) {
-	f.logger.Printf("fresh-start: table=%s ignoring old generation → using ChangeAgeLimit", f.table)
-	return time.Time{}, nil
-}
-func (f *freshStartProgressManager) StartGeneration(ctx context.Context, gen time.Time) error {
-	return f.inner.StartGeneration(ctx, gen)
-}
-func (f *freshStartProgressManager) GetProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID) (scyllacdc.Progress, error) {
-	return scyllacdc.Progress{}, nil // no saved progress → uses ChangeAgeLimit startFrom
-}
-func (f *freshStartProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID, progress scyllacdc.Progress) error {
-	return f.inner.SaveProgress(ctx, gen, table, streamID, progress)
-}
-func (f *freshStartProgressManager) GetApplicationReadStartTime(ctx context.Context) (time.Time, error) {
-	return time.Time{}, nil
-}
-func (f *freshStartProgressManager) SaveApplicationReadStartTime(ctx context.Context, startTime time.Time) error {
-	if ws, ok := f.inner.(scyllacdc.ProgressManagerWithStartTime); ok {
-		return ws.SaveApplicationReadStartTime(ctx, startTime)
-	}
 	return nil
 }
 
