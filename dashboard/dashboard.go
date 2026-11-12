@@ -979,6 +979,15 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		return
 	}
 
+	// Advance the application start time so the reader starts from now - changeAgeLimit.
+	// Without this, scylla-cdc-go resumes from a stale checkpoint and ignores change_age_limit.
+	// One INSERT — existing running tables are unaffected (their per-stream progress is ahead).
+	if anySession != nil {
+		progressTable := fmt.Sprintf("%s.%s", cdcKeyspace, config.ProgressTable)
+		startFrom := time.Now().Add(-changeAgeLimit)
+		updateStartTime(anySession, progressTable, startFrom, s.Logger)
+	}
+
 	// Both CDC + ClickHouse table verified — save to config
 	// If CH target differs from ScyllaDB table name, store as route
 	routeTarget := ""
@@ -1613,4 +1622,26 @@ func quantileFromHistogram(h *dto.Histogram, q float64) float64 {
 		return h.GetSampleSum() / float64(h.GetSampleCount())
 	}
 	return 0
+}
+
+// updateStartTime writes one row to the progress table's special partition to advance
+// the application read start time. This is a single INSERT (lightest possible write).
+// When the CDC reader starts, it computes readFrom = max(savedGeneration, appStartTime).
+// Existing tables are unaffected — their per-stream progress is already ahead of this time.
+// Only a newly added table (with no per-stream progress) starts from this time.
+func updateStartTime(session *gocql.Session, progressTable string, startFrom time.Time, logger *log.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := session.Query(
+		fmt.Sprintf(
+			"INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?, ?)",
+			progressTable,
+		),
+		time.Time{}, "scylla2ch", "", []byte{}, gocql.MinTimeUUID(startFrom),
+	).WithContext(ctx).Exec(); err != nil {
+		logger.Printf("dashboard: update start time table=%s: %v", progressTable, err)
+	} else {
+		logger.Printf("dashboard: set application start time to %v (reader will start from here)", startFrom)
+	}
 }
