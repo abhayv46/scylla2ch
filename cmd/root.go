@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -21,7 +22,31 @@ import (
 var cfgFile string
 
 // Version is set at build time via ldflags: -X scylla2ch/cmd.Version=<version>
+// Falls back to git commit from build info when not set.
 var Version = "dev"
+
+func init() {
+	if Version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			var rev, dirty string
+			for _, s := range info.Settings {
+				switch s.Key {
+				case "vcs.revision":
+					if len(s.Value) >= 7 {
+						rev = s.Value[:7]
+					}
+				case "vcs.modified":
+					if s.Value == "true" {
+						dirty = "-dirty"
+					}
+				}
+			}
+			if rev != "" {
+				Version = "1.0.0-" + rev + dirty
+			}
+		}
+	}
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "scylla2ch",

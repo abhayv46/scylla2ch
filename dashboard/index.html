@@ -385,9 +385,10 @@ function render() {
   verEl.textContent = 'v' + ver;
   if (ver === 'dev') {
     verEl.style.color = 'var(--yellow)';
-    verEl.setAttribute('data-tip', 'Build with version:\ngo build -ldflags\n  "-X scylla2ch/cmd.Version=<tag>"\nto set a proper version.');
+  } else {
+    verEl.style.color = 'var(--green)';
   }
-  $('uptime').textContent = fmtUptime(statusData.uptime_seconds);
+  $('uptime').textContent = '⏱ ' + fmtUptime(statusData.uptime_seconds);
 
   // Role badge
   const badge = $('role-badge');

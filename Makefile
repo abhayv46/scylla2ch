@@ -1,5 +1,5 @@
 BINARY  := scylla2ch
-VERSION := 1.0.0
+VERSION := $(shell git describe --tags --always 2>/dev/null || echo "1.0.0")
 GOFLAGS := -ldflags="-s -w -X scylla2ch/cmd.Version=$(VERSION)"
 
 .PHONY: build test lint run snapshot validate clean docker docker-run docker-stop docker-reload docker-logs docker-sh vendor help
