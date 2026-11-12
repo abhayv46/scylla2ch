@@ -42,7 +42,7 @@ CPUQuota=200%
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/scylla2ch /run/scylla2ch.pid
+ReadWritePaths=/etc/scylla2ch /run
 PrivateTmp=true
 
 [Install]
