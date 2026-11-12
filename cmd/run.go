@@ -467,6 +467,8 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 		// Read live config — always has the latest per-table settings from dashboard/SIGHUP.
 		currentCfg := liveCfg.Load()
+		logger.Printf("startReader table=%s: liveCfg has %d explicit tables, global change_age_limit=%v",
+			tableName, len(currentCfg.Tables.Explicit), currentCfg.CDC.ChangeAgeLimit)
 
 		// Per-reader context: canceled on table remove OR global shutdown
 		readerCtx, readerCancel := context.WithCancel(ctx)
@@ -480,7 +482,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			Advanced: scyllacdc.AdvancedReaderConfig{
 				ConfidenceWindowSize:   currentCfg.CDC.ConfidenceWindow,
 				QueryTimeWindowSize:    currentCfg.CDC.QueryWindow,
-				ChangeAgeLimit:         tableChangeAgeLimit(currentCfg, tableName),
+				ChangeAgeLimit:         tableChangeAgeLimit(currentCfg, tableName, logger),
 				PostEmptyQueryDelay:    1 * time.Second,
 				PostNonEmptyQueryDelay: 1 * time.Second,
 			},
@@ -1173,14 +1175,17 @@ func applyTableBatchConfigs(cfg *config.Config, chWriter *writer.ClickHouseWrite
 // tableChangeAgeLimit returns the per-table CDC age limit, falling back to global.
 // This controls how far back to read on first start (no checkpoint).
 // "10s" = start from ~now, "1h" = last hour, 0 = global default.
-func tableChangeAgeLimit(cfg *config.Config, tableName string) time.Duration {
+func tableChangeAgeLimit(cfg *config.Config, tableName string, logger *log.Logger) time.Duration {
 	// Strip keyspace prefix: "chat.rooms" → "rooms"
 	shortName := tableName
 	if dot := strings.IndexByte(tableName, '.'); dot >= 0 {
 		shortName = tableName[dot+1:]
 	}
 	if tc := cfg.GetTableConfig(shortName); tc != nil && tc.ChangeAgeLimit > 0 {
+		logger.Printf("table=%s: using per-table change_age_limit=%v", tableName, tc.ChangeAgeLimit)
 		return tc.ChangeAgeLimit
 	}
+	logger.Printf("table=%s: no per-table override (shortName=%s, tables=%d) — using global change_age_limit=%v",
+		tableName, shortName, len(cfg.Tables.Explicit), cfg.CDC.ChangeAgeLimit)
 	return cfg.CDC.ChangeAgeLimit
 }
