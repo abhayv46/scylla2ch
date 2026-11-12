@@ -436,8 +436,10 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 				// FIX H12: Add jitter to retry backoff to prevent thundering herd
 				// when multiple tables retry simultaneously after ClickHouse recovery.
 				base := w.cfg.RetryBackoff * time.Duration(1<<uint(attempt-1))
-				jitter := time.Duration(rand.Int63n(int64(base) / 4)) // up to 25% jitter
-				backoff := base + jitter
+				backoff := base
+				if quarter := int64(base) / 4; quarter > 0 {
+					backoff += time.Duration(rand.Int63n(quarter)) // up to 25% jitter
+				}
 				timer := time.NewTimer(backoff)
 				select {
 				case <-timer.C:

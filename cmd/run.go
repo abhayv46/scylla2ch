@@ -387,21 +387,25 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				metrics.UptimeSeconds.Set(time.Since(startTime).Seconds())
 				sdNotify("WATCHDOG=1")
 
-				// ScyllaDB health check every 30s (every 3rd tick).
+				// FIX H5: ScyllaDB health check every 30s (every 3rd tick).
+				// Use sessionMap snapshot instead of stale `sessions` slice —
+				// SIGHUP reload adds dynamic sessions that the startup slice misses.
 				healthTick++
 				if healthTick%3 == 0 {
 					allOK := true
-					for _, s := range sessions {
-						if s.session.Closed() {
+					sessionMu.RLock()
+					for ks, sess := range sessionMap {
+						if sess.Closed() {
 							allOK = false
+							logger.Printf("WARN ScyllaDB session closed for keyspace=%s — health check failed", ks)
 							break
 						}
 					}
+					sessionMu.RUnlock()
 					if allOK {
 						metrics.ScyllaConnected.Set(1)
 					} else {
 						metrics.ScyllaConnected.Set(0)
-						logger.Printf("WARN ScyllaDB session closed — health check failed")
 					}
 				}
 			}
