@@ -149,6 +149,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 		}
 
 		metrics.RowsConsumed.WithLabelValues(c.shortTableName()).Inc()
+		metrics.IncDailyConsumed(c.shortTableName())
 		metrics.LastConsumedTimestampMs.WithLabelValues(c.shortTableName()).Set(float64(time.Now().UnixMilli()))
 		// Track CDC replication lag (how far behind real-time we are).
 		// Clamp to 0: clock skew on a ScyllaDB node can produce future _cdc_ts,
