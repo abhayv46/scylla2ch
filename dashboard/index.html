@@ -236,14 +236,29 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     ClickHouse table must already exist. New keyspaces are discovered automatically.
   </div>
   <div class="add-form">
-    <input type="text" id="new-table" placeholder="keyspace.table (e.g. chat.pending_rooms)" data-tip="ScyllaDB table name.\nUse keyspace.table format\nor just table name to auto-detect.">
-    <input type="text" id="new-ch-table" placeholder="ClickHouse target (leave empty = same name)" data-tip="ClickHouse target table.\nLeave empty to use same name.\nUse database.table for\na different ClickHouse database.">
-    <input type="number" id="new-batch-size" placeholder="batch size (default: 500)" min="10" max="100000" style="width:160px" data-tip="Rows per flush for this table.\nHigher = fewer ClickHouse INSERTs.\nDefault: 500 (global).">
-    <input type="number" id="new-batch-interval" placeholder="interval ms (default: 1000)" min="100" max="60000" step="100" style="width:170px" data-tip="Flush interval in milliseconds.\nExamples: 500, 1000, 5000, 10000.\nDefault: 1000ms (global).">
-    <input type="text" id="new-start-from" list="start-from-opts" placeholder="Start from (default: now)" style="width:170px" data-tip="How far back to read CDC history.\nType any Go duration: 1s, 30s, 5m, 1h, 8h…\nEmpty = now (starts from current time).\nCDC data retained for ~24h (TTL).">
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <label style="font-size:0.55rem;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px">Source table</label>
+      <input type="text" id="new-table" placeholder="keyspace.table (e.g. chat.pending_rooms)" data-tip="ScyllaDB table name.\nUse keyspace.table format\nor just table name to auto-detect.">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <label style="font-size:0.55rem;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px">CH target <span style="opacity:0.5">(default: same name)</span></label>
+      <input type="text" id="new-ch-table" placeholder="database.table" data-tip="ClickHouse target table.\nLeave empty to use same name.\nUse database.table for\na different ClickHouse database.">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <label style="font-size:0.55rem;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px">Batch size <span style="opacity:0.5">(default: 500)</span></label>
+      <input type="number" id="new-batch-size" placeholder="500" min="10" max="100000" style="width:120px" data-tip="Rows per flush for this table.\nHigher = fewer ClickHouse INSERTs.\nDefault: 500 (global batch.size).">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <label style="font-size:0.55rem;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px">Flush interval <span style="opacity:0.5">(default: 1000ms)</span></label>
+      <input type="number" id="new-batch-interval" placeholder="1000" min="100" max="60000" step="100" style="width:120px" data-tip="Flush interval in milliseconds.\nExamples: 500, 1000, 5000, 10000.\nDefault: 1000ms (global batch.interval).">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:2px">
+      <label style="font-size:0.55rem;color:var(--fg2);text-transform:uppercase;letter-spacing:0.5px">Start from <span style="opacity:0.5">(default: 10s ago)</span></label>
+      <input type="text" id="new-start-from" list="start-from-opts" placeholder="10s" style="width:120px" data-tip="How far back to read CDC history on first start.\nDefault: 10s (starts near real-time).\nType any Go duration: 1s, 30s, 5m, 1h, 8h…\nCDC data retained for ~24h (TTL).\nOnly used when no checkpoint exists.">
+    </div>
     <datalist id="start-from-opts">
+      <option value="10s">10 seconds (default)</option>
       <option value="1s">1 second</option>
-      <option value="5s">5 seconds</option>
       <option value="30s">30 seconds</option>
       <option value="5m">5 minutes</option>
       <option value="30m">30 minutes</option>
@@ -252,7 +267,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
       <option value="8h">8 hours</option>
       <option value="24h">24 hours (max CDC TTL)</option>
     </datalist>
-    <button onclick="addTable()">Stream Table</button>
+    <button onclick="addTable()" style="align-self:flex-end">Stream Table</button>
   </div>
 
   <div class="global-charts" id="global-charts">
@@ -265,7 +280,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
       <canvas id="gchart-lag" height="60"></canvas>
     </div>
     <div class="gchart">
-      <div class="gchart-header"><span class="gchart-title">Buffer Depth (total rows)</span><span class="gchart-value" id="gchart-buffer-val">-</span></div>
+      <div class="gchart-header"><span class="gchart-title" data-tip="Rows buffered in memory waiting for ClickHouse flush.\nEach table has a channel buffer = 2 × batch_size (default: 1000 rows).\n0 = real-time, filling up = ClickHouse slower than CDC.\nFull buffer = back-pressure (CDC reader pauses).">Buffer Depth (total rows)</span><span class="gchart-value" id="gchart-buffer-val">-</span></div>
       <canvas id="gchart-buffer" height="60"></canvas>
     </div>
     <div class="gchart">
