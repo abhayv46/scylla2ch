@@ -990,8 +990,6 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 		progressTable := fmt.Sprintf("%s.%s", cdcKeyspace, config.ProgressTable)
 		progressTableName := cdcKeyspace + "." + scyllaTable
 		clearTableCheckpoint(anySession, progressTable, progressTableName, s.Logger)
-		startFrom := time.Now().Add(-changeAgeLimit)
-		updateStartTime(anySession, progressTable, startFrom, s.Logger)
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
@@ -1639,6 +1637,7 @@ func clearTableCheckpoint(session *gocql.Session, progressTable, tableName strin
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	// 1. Clear per-stream progress rows for this table
 	iter := session.Query(
 		fmt.Sprintf("SELECT generation, application_name, table_name, stream_id FROM %s WHERE application_name = ? AND table_name = ? ALLOW FILTERING", progressTable),
 		"scylla2ch", tableName,
@@ -1664,28 +1663,21 @@ func clearTableCheckpoint(session *gocql.Session, progressTable, tableName strin
 	if err := iter.Close(); err != nil {
 		logger.Printf("dashboard: checkpoint scan table=%s: %v", tableName, err)
 	}
-	if cleared > 0 {
-		logger.Printf("dashboard: cleared %d checkpoint rows for table=%s (reader will start fresh with change_age_limit)", cleared, tableName)
-	}
-}
 
-// updateStartTime advances the application read start time in the progress table.
-// One INSERT to the special partition. This ensures readFrom = max(generation, appStartTime) = now
-// even if the global current_generation row points to an old topology generation.
-// Existing tables are unaffected — their per-stream progress is current and wins over readFrom.
-func updateStartTime(session *gocql.Session, progressTable string, startFrom time.Time, logger *log.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
+	// 2. Clear the global generation + start time row (special partition).
+	//    PK: (generation=zero-time, application_name="scylla2ch", table_name="", stream_id=empty).
+	//    This forces scylla-cdc-go to use ChangeAgeLimit on next reader start.
+	//    Safe: existing running tables are unaffected (they already have their reader running
+	//    and only re-read the generation on restart, at which point they re-save it).
 	if err := session.Query(
-		fmt.Sprintf(
-			"INSERT INTO %s (generation, application_name, table_name, stream_id, last_timestamp) VALUES (?, ?, ?, ?, ?)",
-			progressTable,
-		),
-		time.Time{}, "scylla2ch", "", []byte{}, gocql.MinTimeUUID(startFrom),
+		fmt.Sprintf("DELETE FROM %s WHERE generation = ? AND application_name = ? AND table_name = ? AND stream_id = ?", progressTable),
+		time.Time{}, "scylla2ch", "", []byte{},
 	).WithContext(ctx).Exec(); err != nil {
-		logger.Printf("dashboard: update start time: %v", err)
+		logger.Printf("dashboard: clear generation row: %v", err)
 	} else {
-		logger.Printf("dashboard: set application start time to %v", startFrom)
+		cleared++
 	}
+
+	logger.Printf("dashboard: cleared %d checkpoint rows for table=%s (reader will start fresh)", cleared, tableName)
 }
+
