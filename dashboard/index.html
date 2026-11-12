@@ -122,7 +122,13 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 .gchart .gchart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
 .gchart .gchart-title { font-size: 0.7rem; color: var(--fg2); text-transform: uppercase; }
 .gchart .gchart-value { font-size: 1rem; font-weight: 600; }
-.gchart canvas { width: 100%; height: 60px; display: block; border-radius: 3px; }
+.gchart canvas { width: 100%; height: 60px; display: block; border-radius: 3px; cursor: crosshair; }
+.spark-box canvas { cursor: crosshair; }
+
+/* chart hover tooltip */
+.chart-tooltip { position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 7px; border-radius: 4px;
+  font-size: 0.65rem; pointer-events: none; z-index: 60; white-space: nowrap; border: 1px solid var(--border);
+  transform: translateX(-50%); transition: opacity 0.1s; }
 
 /* tooltip */
 [data-tip] { position: relative; }
@@ -770,7 +776,7 @@ function recordHistory() {
   prevMetrics = JSON.parse(JSON.stringify(metricsData));
 }
 
-function drawSparkline(canvas, data, color, thresholdColor, threshold) {
+function drawSparkline(canvas, data, color, thresholdColor, threshold, unit) {
   if (!canvas || !data.length) return;
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
@@ -781,6 +787,13 @@ function drawSparkline(canvas, data, color, thresholdColor, threshold) {
   ctx.clearRect(0, 0, w, h);
   const max = Math.max(...data, 1) * 1.1;
   const step = w / (HISTORY_SIZE - 1);
+
+  // Store data on canvas for hover lookup
+  canvas._chartData = data;
+  canvas._chartMax = max;
+  canvas._chartStep = step;
+  canvas._chartColor = color;
+  canvas._chartUnit = unit || '';
 
   // Threshold line
   if (threshold !== undefined && threshold < max) {
@@ -822,6 +835,35 @@ function drawSparkline(canvas, data, color, thresholdColor, threshold) {
     const ly = h - (data[data.length - 1] / max) * h;
     ctx.beginPath(); ctx.arc(lx, ly, 2.5, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
   }
+
+  // Attach hover listener once
+  if (!canvas._hoverBound) {
+    canvas._hoverBound = true;
+    const tip = document.createElement('div');
+    tip.className = 'chart-tooltip';
+    tip.style.opacity = '0';
+    canvas.parentElement.style.position = 'relative';
+    canvas.parentElement.appendChild(tip);
+
+    canvas.addEventListener('mousemove', function(e) {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const d = canvas._chartData;
+      if (!d || !d.length) return;
+      const s = canvas._chartStep;
+      const offset = HISTORY_SIZE - d.length;
+      const idx = Math.round(mx / s) - offset;
+      if (idx < 0 || idx >= d.length) { tip.style.opacity = '0'; return; }
+      const val = d[idx];
+      const u = canvas._chartUnit;
+      tip.textContent = (val % 1 === 0 ? val : val.toFixed(2)) + (u ? ' ' + u : '');
+      const px = (offset + idx) * s;
+      tip.style.left = px + 'px';
+      tip.style.bottom = (canvas.clientHeight + 6) + 'px';
+      tip.style.opacity = '1';
+    });
+    canvas.addEventListener('mouseleave', function() { tip.style.opacity = '0'; });
+  }
 }
 
 function renderCharts() {
@@ -829,31 +871,31 @@ function renderCharts() {
   const latest = g.throughput[g.throughput.length - 1] || 0;
   const el = document.getElementById('gchart-throughput-val');
   if (el) el.textContent = latest.toFixed(1);
-  drawSparkline(document.getElementById('gchart-throughput'), g.throughput, 'rgb(88,166,255)');
+  drawSparkline(document.getElementById('gchart-throughput'), g.throughput, 'rgb(88,166,255)', undefined, undefined, 'rows/s');
 
   const latestLag = g.lag[g.lag.length - 1] || 0;
   const lagEl = document.getElementById('gchart-lag-val');
   if (lagEl) { lagEl.textContent = latestLag.toFixed(1) + 's'; lagEl.style.color = latestLag > 60 ? 'var(--red)' : latestLag > 10 ? 'var(--yellow)' : 'var(--green)'; }
-  drawSparkline(document.getElementById('gchart-lag'), g.lag, 'rgb(210,153,34)', 'rgba(248,81,73,0.3)', 60);
+  drawSparkline(document.getElementById('gchart-lag'), g.lag, 'rgb(210,153,34)', 'rgba(248,81,73,0.3)', 60, 's');
 
   const latestBuf = g.buffer[g.buffer.length - 1] || 0;
   const bufEl = document.getElementById('gchart-buffer-val');
   if (bufEl) bufEl.textContent = fmt(latestBuf);
-  drawSparkline(document.getElementById('gchart-buffer'), g.buffer, 'rgb(188,140,255)');
+  drawSparkline(document.getElementById('gchart-buffer'), g.buffer, 'rgb(188,140,255)', undefined, undefined, 'rows');
 
   const latestMem = g.mem[g.mem.length - 1] || 0;
   const memEl = document.getElementById('gchart-mem-val');
   if (memEl) memEl.textContent = latestMem.toFixed(1) + ' MB';
-  drawSparkline(document.getElementById('gchart-mem'), g.mem, 'rgb(57,210,192)');
+  drawSparkline(document.getElementById('gchart-mem'), g.mem, 'rgb(57,210,192)', undefined, undefined, 'MB');
 
   // Per-table sparklines
   for (const [name, h] of Object.entries(history.tables)) {
     const readC = document.querySelector(`[data-spark="${CSS.escape(name)}-read"]`);
     const writeC = document.querySelector(`[data-spark="${CSS.escape(name)}-write"]`);
     const lagC = document.querySelector(`[data-spark="${CSS.escape(name)}-lag"]`);
-    drawSparkline(readC, h.read, 'rgb(88,166,255)');
-    drawSparkline(writeC, h.write, 'rgb(63,185,80)');
-    drawSparkline(lagC, h.lag, 'rgb(210,153,34)', 'rgba(248,81,73,0.3)', 60);
+    drawSparkline(readC, h.read, 'rgb(88,166,255)', undefined, undefined, 'rows/s');
+    drawSparkline(writeC, h.write, 'rgb(63,185,80)', undefined, undefined, 'rows/s');
+    drawSparkline(lagC, h.lag, 'rgb(210,153,34)', 'rgba(248,81,73,0.3)', 60, 's');
   }
 }
 
