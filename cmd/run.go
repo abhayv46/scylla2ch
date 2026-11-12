@@ -40,6 +40,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -79,6 +80,12 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+
+	// liveCfg is the single source of truth for the running config.
+	// All goroutines read liveCfg.Load() — never the startup `cfg` variable.
+	// reloadConfig swaps it atomically on SIGHUP so every reader/consumer sees the latest.
+	var liveCfg atomic.Pointer[config.Config]
+	liveCfg.Store(cfg)
 
 	logger := log.New(os.Stderr, "[scylla2ch] ", log.Ldate|log.Ltime|log.Lmicroseconds)
 
@@ -458,12 +465,8 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			filePM.ClearTable(tableName)
 		}
 
-		// Re-read config to pick up per-table settings added by dashboard/SIGHUP.
-		// The startup `cfg` doesn't know about tables added later via dashboard.
-		currentCfg := cfg
-		if freshCfg, loadErr := config.Load(cfgFile); loadErr == nil {
-			currentCfg = freshCfg
-		}
+		// Read live config — always has the latest per-table settings from dashboard/SIGHUP.
+		currentCfg := liveCfg.Load()
 
 		// Per-reader context: canceled on table remove OR global shutdown
 		readerCtx, readerCancel := context.WithCancel(ctx)
@@ -620,7 +623,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			case <-ctx.Done():
 				return
 			case <-sighupCh:
-				reloadConfig(cfgFile, cfg, disc, chWriter, factory, sessionMap, chDBMap,
+				reloadConfig(cfgFile, &liveCfg, disc, chWriter, factory, sessionMap, chDBMap,
 					&dynamicSessions, &sessionMu, &running, &runningMu, startReader, stopTable, ctx, logger)
 			}
 		}
@@ -632,7 +635,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 		readerWg.Add(1)
 		go func() {
 			defer readerWg.Done()
-			ticker := time.NewTicker(cfg.Tables.DiscoverInterval)
+			ticker := time.NewTicker(cfg.Tables.DiscoverInterval) // initial interval from startup
 			defer ticker.Stop()
 			logger.Printf("hot-reload enabled: scanning %d keyspaces for new CDC tables every %s", len(sessions), cfg.Tables.DiscoverInterval)
 
@@ -675,7 +678,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 							// New table detected — auto-create ClickHouse table + start reader
 							logger.Printf("HOT-RELOAD: new CDC table detected: %s", fqn)
 
-							if cfg.Tables.AutoCreate {
+							if liveCfg.Load().Tables.AutoCreate {
 								if err := disc.AutoCreateCHTable(chWriter.Conn(), s.session, s.keyspace, s.chDB, t); err != nil {
 									logger.Printf("WARN hot-reload auto-create %s: %v (may already exist)", t, err)
 								}
@@ -916,9 +919,10 @@ func connectScylla(cfg *config.Config, keyspace string, logger *log.Logger) (*go
 
 // reloadConfig handles SIGHUP: loads new config, starts NEW readers and stops REMOVED readers.
 // Only tables in existing keyspaces can be added; new keyspaces are auto-created.
+// Swaps liveCfg atomically so all goroutines (hot-reload, consumers, factory) see fresh config.
 func reloadConfig(
 	cfgFile string,
-	oldCfg *config.Config,
+	liveCfg *atomic.Pointer[config.Config],
 	disc *converter.Discoverer,
 	chWriter *writer.ClickHouseWriter,
 	factory *consumer.Factory,
@@ -950,6 +954,13 @@ func reloadConfig(
 		}
 		logger.Printf("SIGHUP reload: config loaded successfully on retry")
 	}
+
+	// Swap the live config atomically — all goroutines now see the new config.
+	// This fixes: hot-reload discover interval, auto_create flag, consumer routing,
+	// column skipping, factory checkpoint interval, and startReader per-table settings.
+	liveCfg.Store(newCfg)
+	factory.UpdateConfig(newCfg)
+	logger.Printf("SIGHUP reload: live config updated")
 
 	// Build new table list
 	var newTables []string

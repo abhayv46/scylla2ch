@@ -81,7 +81,7 @@ type Consumer struct {
 	tableName string
 	shortName string // cached: "chat.rooms" → "rooms" (avoids per-row string split)
 	chDB      string // ClickHouse database name (for qualified writer.Add calls)
-	cfg       *config.Config
+	factory   *Factory // reads live config via factory.getConfig() — picks up SIGHUP changes
 	writer    *writer.ClickHouseWriter
 	logger    *log.Logger
 	reporter  *scyllacdc.PeriodicProgressReporter
@@ -141,7 +141,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 
 		// Route: does this table have multi-target routing?
 		// Pass onFlush callback — checkpoint advances only after ClickHouse write succeeds
-		tableConfig := c.cfg.GetTableConfig(c.shortTableName())
+		tableConfig := c.factory.getConfig().GetTableConfig(c.shortTableName())
 		if tableConfig != nil && len(tableConfig.Routes) > 0 {
 			c.routeToTargets(values, tableConfig, onFlush)
 		} else {
@@ -191,7 +191,7 @@ func (c *Consumer) extractValues(row *scyllacdc.ChangeRow) map[string]interface{
 	cols := row.Columns()
 	values := make(map[string]interface{}, len(cols))
 
-	tc := c.cfg.GetTableConfig(c.shortTableName())
+	tc := c.factory.getConfig().GetTableConfig(c.shortTableName())
 
 	for _, colInfo := range cols {
 		name := colInfo.Name

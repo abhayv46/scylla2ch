@@ -34,6 +34,7 @@ import (
 // Implements scyllacdc.ChangeConsumerFactory.
 type Factory struct {
 	cfg      *config.Config
+	cfgMu    sync.RWMutex     // protects cfg for SIGHUP reload
 	writer   *writer.ClickHouseWriter
 	logger   *log.Logger
 	chDBMap  map[string]string // ScyllaDB keyspace → ClickHouse database name
@@ -43,6 +44,22 @@ type Factory struct {
 func NewFactory(cfg *config.Config, w *writer.ClickHouseWriter, l *log.Logger) *Factory {
 	SetLogger(l) // set package-level logger for ConvertValue warnings
 	return &Factory{cfg: cfg, writer: w, logger: l, chDBMap: make(map[string]string)}
+}
+
+// UpdateConfig swaps the config after SIGHUP reload.
+// New consumers created after this call use the fresh config (routing, column skip, etc.).
+func (f *Factory) UpdateConfig(cfg *config.Config) {
+	f.cfgMu.Lock()
+	f.cfg = cfg
+	f.cfgMu.Unlock()
+}
+
+// getConfig returns the current config (safe for concurrent access).
+func (f *Factory) getConfig() *config.Config {
+	f.cfgMu.RLock()
+	c := f.cfg
+	f.cfgMu.RUnlock()
+	return c
 }
 
 // SetKeyspaceDB maps a ScyllaDB keyspace to a ClickHouse database name.
@@ -60,11 +77,15 @@ func (f *Factory) CreateChangeConsumer(
 ) (scyllacdc.ChangeConsumer, error) {
 	tableName := input.TableName // e.g., "chat.rooms"
 
+	// Snapshot the live config — picks up SIGHUP changes to checkpoint interval,
+	// routing rules, column skip lists, etc.
+	cfg := f.getConfig()
+
 	// Use the built-in PeriodicProgressReporter for checkpointing
 	reporter := scyllacdc.NewPeriodicProgressReporter(
 		f.logger,
-		f.cfg.CDC.CheckpointInterval, // default 60s
-		input.ProgressReporter,       // provided by the reader
+		cfg.CDC.CheckpointInterval, // default 60s
+		input.ProgressReporter,     // provided by the reader
 	)
 	reporter.Start(ctx)
 
@@ -84,14 +105,14 @@ func (f *Factory) CreateChangeConsumer(
 	chDB := f.chDBMap[keyspace]
 	f.chDBMu.RUnlock()
 	if chDB == "" {
-		chDB = f.cfg.ClickHouse.Database // fallback for single-keyspace
+		chDB = cfg.ClickHouse.Database // fallback for single-keyspace
 	}
 
 	return &Consumer{
 		tableName: tableName,
 		shortName: shortName,
 		chDB:      chDB,
-		cfg:       f.cfg,
+		factory:   f,
 		writer:    f.writer,
 		logger:    f.logger,
 		reporter:  reporter,
