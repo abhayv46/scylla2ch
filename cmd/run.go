@@ -577,6 +577,10 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	// Notify systemd: READY + MAINPID so systemd tracks the new child after tableflip handoff.
 	// Without this, systemd sees the old PID exit and restarts (10s gap instead of zero-downtime).
 	sdNotify(fmt.Sprintf("READY=1\nMAINPID=%d", os.Getpid()))
+	// Write PID file so systemd tracks the correct process after tableflip handoff.
+	if err := os.WriteFile("/run/scylla2ch.pid", []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644); err != nil {
+		logger.Printf("warning: could not write PID file: %v", err)
+	}
 	logger.Printf("process ready (pid=%d) — send SIGUSR2 for zero-downtime upgrade", os.Getpid())
 
 	// 8. SIGHUP config reload: re-read config file and start readers for NEW tables only.

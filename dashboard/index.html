@@ -8,8 +8,8 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
-  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
-  --fg: #c9d1d9; --fg2: #8b949e; --green: #3fb950; --red: #f85149;
+  --bg: #090c10; --bg2: #151b23; --bg3: #212830; --border: #3d444d;
+  --fg: #e6edf3; --fg2: #9198a1; --green: #3fb950; --red: #f85149;
   --yellow: #d29922; --blue: #58a6ff; --purple: #bc8cff; --cyan: #39d2c0;
   --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 }
@@ -84,7 +84,8 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 /* tables */
 .section-title { font-size: 0.85rem; margin-bottom: 0.75rem; color: var(--fg2); }
 .table-grid { display: grid; gap: 0.75rem; }
-.table-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; }
+.table-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 1rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
 .table-card .table-header { display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 0.75rem; }
 .table-card .table-name { font-size: 0.9rem; font-weight: 600; }
@@ -156,8 +157,9 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 <!-- Login page -->
 <div id="login-page">
   <div id="login-box">
-    <h1>ScyllaDB → ClickHouse</h1>
-    <div style="font-size:0.7rem;color:var(--fg2);margin-top:-1rem;margin-bottom:1.5rem">CDC Pipeline</div>
+    <div style="text-align:center;font-size:2rem;margin-bottom:0.5rem">⚡</div>
+    <h1 style="text-align:center">scylla2ch</h1>
+    <div style="font-size:0.7rem;color:var(--fg2);margin-top:-0.5rem;margin-bottom:1.5rem;text-align:center">ScyllaDB CDC → ClickHouse</div>
     <input type="text" id="login-user" placeholder="username" autocomplete="username">
     <input type="password" id="login-pass" placeholder="password" autocomplete="current-password">
     <button onclick="doLogin()">Login</button>
@@ -168,7 +170,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 <!-- Dashboard -->
 <div id="dashboard">
   <header>
-    <div><h1 style="margin-bottom:0.15rem">ScyllaDB → ClickHouse</h1><div style="font-size:0.65rem;color:var(--fg2)">CDC Pipeline</div></div>
+    <div><h1 style="margin-bottom:0.15rem">⚡ scylla2ch</h1><div style="font-size:0.65rem;color:var(--fg2)">ScyllaDB CDC → ClickHouse</div></div>
     <div class="meta">
       <div id="version"></div>
       <div id="uptime"></div>

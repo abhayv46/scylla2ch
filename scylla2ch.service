@@ -15,6 +15,7 @@ StartLimitBurst=3
 #   6. systemd sees old PID exit but MAINPID is the new one → service stays "active"
 Type=notify
 NotifyAccess=all
+PIDFile=/run/scylla2ch.pid
 ExecStart=/usr/local/bin/scylla2ch run --config /etc/scylla2ch/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 # on-failure: clean exit (code 0) from tableflip handoff = no restart.
@@ -41,7 +42,7 @@ CPUQuota=200%
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/scylla2ch
+ReadWritePaths=/etc/scylla2ch /run/scylla2ch.pid
 PrivateTmp=true
 
 [Install]
