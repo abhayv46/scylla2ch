@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -53,8 +52,7 @@ type Config struct {
 	Health     HealthConfig     `yaml:"health"`
 	Dashboard  DashboardConfig  `yaml:"dashboard"`
 
-	tableIndex     map[string]*TableConfig // cached O(1) lookup, built on first GetTableConfig call
-	tableIndexOnce sync.Once
+	tableIndex map[string]*TableConfig // cached O(1) lookup, built in Load() / buildCaches()
 }
 
 type ScyllaConfig struct {
@@ -148,8 +146,7 @@ type TableConfig struct {
 	BatchSize     int           `yaml:"batch_size,omitempty"`     // rows per flush (0 = global)
 	BatchInterval time.Duration `yaml:"batch_interval,omitempty"` // flush timer (0 = global)
 
-	skipColumnsMap     map[string]bool // cached O(1) lookup, built on first IsColumnSkipped call
-	skipColumnsMapOnce sync.Once
+	skipColumnsMap map[string]bool // cached O(1) lookup, built in Load() / buildCaches()
 }
 
 type RouteConfig struct {
@@ -238,16 +235,9 @@ func evalCondition(cond string, row map[string]interface{}) bool {
 // Checks explicit tables first, then overrides.
 // Uses a cached map for O(1) lookup (called per CDC row on the hot path).
 func (c *Config) GetTableConfig(name string) *TableConfig {
-	c.tableIndexOnce.Do(func() {
-		c.tableIndex = make(map[string]*TableConfig, len(c.Tables.Explicit)+len(c.Tables.Overrides))
-		// Overrides first so explicit takes precedence (overwrite in map)
-		for i := range c.Tables.Overrides {
-			c.tableIndex[c.Tables.Overrides[i].Name] = &c.Tables.Overrides[i]
-		}
-		for i := range c.Tables.Explicit {
-			c.tableIndex[c.Tables.Explicit[i].Name] = &c.Tables.Explicit[i]
-		}
-	})
+	if c.tableIndex == nil {
+		c.buildCaches()
+	}
 	return c.tableIndex[name]
 }
 
@@ -299,14 +289,12 @@ func (c *Config) UniqueKeyspaces() []string {
 // IsColumnSkipped returns true if a column should be skipped for a given table.
 // Uses a cached map for O(1) lookup on the hot path (called per column per CDC row).
 func (tc *TableConfig) IsColumnSkipped(col string) bool {
-	tc.skipColumnsMapOnce.Do(func() {
-		if len(tc.SkipColumns) > 0 {
-			tc.skipColumnsMap = make(map[string]bool, len(tc.SkipColumns))
-			for _, s := range tc.SkipColumns {
-				tc.skipColumnsMap[s] = true
-			}
+	if tc.skipColumnsMap == nil && len(tc.SkipColumns) > 0 {
+		tc.skipColumnsMap = make(map[string]bool, len(tc.SkipColumns))
+		for _, s := range tc.SkipColumns {
+			tc.skipColumnsMap[s] = true
 		}
-	})
+	}
 	return tc.skipColumnsMap[col]
 }
 
@@ -454,7 +442,41 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("either tables.auto_discover, tables.explicit, or tables.tables_dir is required")
 	}
 
+	cfg.buildCaches()
 	return &cfg, nil
+}
+
+// buildCaches pre-builds all O(1) lookup maps so that TableConfig and Config
+// are plain data (no sync.Once / noCopy) and safe to copy in range loops.
+func (c *Config) buildCaches() {
+	// Table index: name → *TableConfig (overrides first, explicit wins)
+	c.tableIndex = make(map[string]*TableConfig, len(c.Tables.Explicit)+len(c.Tables.Overrides))
+	for i := range c.Tables.Overrides {
+		c.tableIndex[c.Tables.Overrides[i].Name] = &c.Tables.Overrides[i]
+	}
+	for i := range c.Tables.Explicit {
+		c.tableIndex[c.Tables.Explicit[i].Name] = &c.Tables.Explicit[i]
+	}
+
+	// Per-table skipColumnsMap
+	for i := range c.Tables.Explicit {
+		tc := &c.Tables.Explicit[i]
+		if len(tc.SkipColumns) > 0 {
+			tc.skipColumnsMap = make(map[string]bool, len(tc.SkipColumns))
+			for _, s := range tc.SkipColumns {
+				tc.skipColumnsMap[s] = true
+			}
+		}
+	}
+	for i := range c.Tables.Overrides {
+		tc := &c.Tables.Overrides[i]
+		if len(tc.SkipColumns) > 0 {
+			tc.skipColumnsMap = make(map[string]bool, len(tc.SkipColumns))
+			for _, s := range tc.SkipColumns {
+				tc.skipColumnsMap[s] = true
+			}
+		}
+	}
 }
 
 // loadTablesDir reads all *.yaml / *.yml files from a directory and parses
@@ -490,7 +512,7 @@ func loadTablesDir(dir string) ([]TableConfig, error) {
 
 		expanded := os.ExpandEnv(string(data))
 
-		// Unmarshal directly into slice element to avoid copying sync.Once
+		// Unmarshal directly into slice element to avoid copying unexported fields
 		tables = append(tables, TableConfig{})
 		tc := &tables[len(tables)-1]
 		if err := yaml.Unmarshal([]byte(expanded), tc); err != nil {
