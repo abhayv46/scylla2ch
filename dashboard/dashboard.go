@@ -77,6 +77,7 @@ type State struct {
 type sessionEntry struct {
 	expiry time.Time
 	role   string // "owner" or "viewer"
+	user   string // username for clearing old sessions on re-login
 }
 
 var (
@@ -95,7 +96,8 @@ var (
 // without this mutex, concurrent dashboard requests can corrupt the YAML.
 var configFileMu sync.Mutex
 
-const sessionTTL = 24 * time.Hour
+const sessionTTLOwner = 7 * 24 * time.Hour  // admin sessions last 7 days
+const sessionTTLViewer = 24 * time.Hour      // viewer sessions last 24h
 const sessionCookie = "scylla2ch_session"
 const maxLoginAttempts = 5           // max failed attempts per IP
 const loginWindow = 5 * time.Minute  // within this window
@@ -281,14 +283,23 @@ func NewMux(s *State) http.Handler {
 			return
 		}
 
-		// Clean expired sessions before creating new one
-		if len(sessions) > maxSessions {
-			cleanExpiredSessions()
+		// Clean expired sessions + clear old sessions for the same user (re-login)
+		sessionsMu.Lock()
+		for k, entry := range sessions {
+			if entry.user == req.User || time.Now().After(entry.expiry) {
+				delete(sessions, k)
+			}
+		}
+		sessionsMu.Unlock()
+
+		ttl := sessionTTLViewer
+		if role == "owner" {
+			ttl = sessionTTLOwner
 		}
 
 		token := genToken()
 		sessionsMu.Lock()
-		sessions[token] = sessionEntry{expiry: time.Now().Add(sessionTTL), role: role}
+		sessions[token] = sessionEntry{expiry: time.Now().Add(ttl), role: role, user: req.User}
 		sessionsMu.Unlock()
 
 		http.SetCookie(w, &http.Cookie{
@@ -298,7 +309,7 @@ func NewMux(s *State) http.Handler {
 			HttpOnly: true,
 			// Secure: true omitted — dashboard accessed via SSM port forwarding (localhost HTTP)
 			SameSite: http.SameSiteStrictMode,
-			MaxAge:   int(sessionTTL.Seconds()),
+			MaxAge:   int(ttl.Seconds()),
 		})
 		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "role": role})
 	})
