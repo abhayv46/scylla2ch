@@ -86,6 +86,7 @@ type State struct {
 	// Used by dashboard to clear table checkpoints on fresh start.
 	ProgressManager interface {
 		ClearTable(table string)
+		UnblockTable(table string)
 		TableCount() int
 	}
 }

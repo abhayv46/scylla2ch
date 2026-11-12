@@ -5,7 +5,7 @@
 //
 // Design:
 //   - In-memory: per-table progress (max timeuuid across all streams)
-//   - On disk: periodic JSON dump (default: every 1 hour)
+//   - On disk: periodic JSON dump (default: every 1 minute)
 //   - On shutdown: final flush (graceful drain)
 //   - On restart: load from file → resume from checkpoint. No file → use ChangeAgeLimit.
 //
@@ -13,10 +13,10 @@
 //   - One entry per table = tiny file (10 tables ≈ 1 KB)
 //   - On restart, all streams resume from the table-level checkpoint
 //   - ClickHouse ReplacingMergeTree(_cdc_ts) deduplicates any replayed rows
-//   - Max replay = checkpoint_interval (default 1h) — negligible with dedup
+//   - Max replay = checkpoint_interval (default 1m) — negligible with dedup
 //
 // Recovery scenarios:
-//   - Process restart:  read file → replay ≤1h → dedup in ClickHouse ✓
+//   - Process restart:  read file → replay ≤1m → dedup in ClickHouse ✓
 //   - EC2 reboot:       EBS survives → same as restart ✓
 //   - EC2 terminated:   no file → use change_age_limit (8h) → dedup ✓
 package progress
@@ -43,6 +43,12 @@ type FileProgressManager struct {
 	// Per-table progress: table_name ("keyspace.table") → latest timeuuid
 	// Stores the max across all streams — on restart all streams resume from here.
 	tableProgress map[string]gocql.UUID
+
+	// blocked tables: SaveProgress is a no-op for these tables.
+	// Prevents race: old reader's End() → SaveProgress writes back old progress
+	// AFTER ClearTable removed it. Without this, remove+re-add has a race window
+	// where the old reader's final checkpoint overwrites the cleared state.
+	blocked sync.Map // table name → struct{}
 
 	filePath      string
 	flushInterval time.Duration
@@ -207,14 +213,35 @@ func (f *FileProgressManager) Stop() {
 	<-f.doneCh
 }
 
-// ClearTable removes a table's checkpoint from memory.
-// Used by dashboard "fresh start" — next reader start uses ChangeAgeLimit.
+// ClearTable removes a table's checkpoint from memory, blocks stale SaveProgress calls
+// from the old reader's End(), and immediately flushes to disk so the cleared state
+// survives process restart (SIGUSR2 / systemctl restart).
+//
+// The block prevents a race: stopTable → cancelFn() (async) → old reader End() →
+// SaveProgress writes old progress back AFTER ClearTable deleted it.
+// Call UnblockTable when the new reader is about to start.
 func (f *FileProgressManager) ClearTable(table string) {
+	// Block SaveProgress for this table FIRST — prevents race with old reader's End()
+	f.blocked.Store(table, struct{}{})
+
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	delete(f.tableProgress, table)
 	f.dirty = true
-	f.logger.Printf("checkpoint: cleared table=%s (fresh start)", table)
+	f.mu.Unlock()
+
+	// Immediately flush to disk — ensures cleared state survives process restart.
+	// Without this, SIGUSR2 loads the old checkpoint from disk and resumes from 8h ago.
+	if err := f.flushToDisk(); err != nil {
+		f.logger.Printf("ERROR checkpoint: flush after clear table=%s: %v", table, err)
+	} else {
+		f.logger.Printf("checkpoint: cleared + flushed table=%s (fresh start persisted to disk)", table)
+	}
+}
+
+// UnblockTable re-enables SaveProgress for a table after ClearTable blocked it.
+// Called when the new reader is set up and ready to save its own progress.
+func (f *FileProgressManager) UnblockTable(table string) {
+	f.blocked.Delete(table)
 }
 
 // TableCount returns the number of tables with checkpoints.
@@ -250,6 +277,12 @@ func (f *FileProgressManager) GetProgress(ctx context.Context, gen time.Time, ta
 }
 
 func (f *FileProgressManager) SaveProgress(ctx context.Context, gen time.Time, table string, streamID scyllacdc.StreamID, p scyllacdc.Progress) error {
+	// Check if this table is blocked (being cleared for fresh start).
+	// Old reader's End() → SaveProgress can race with ClearTable — block prevents it.
+	if _, blocked := f.blocked.Load(table); blocked {
+		return nil
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
