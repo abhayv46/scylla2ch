@@ -982,9 +982,11 @@ func handleAddTable(w http.ResponseWriter, r *http.Request, s *State) {
 	// Clear old per-stream checkpoint rows so the reader starts fresh with change_age_limit.
 	// Without this, scylla-cdc-go resumes from the saved per-stream progress and ignores change_age_limit.
 	// Only touches the tiny scylla2ch_progress table (~10 rows per table), not production data.
+	// scylla-cdc-go stores table_name as "keyspace.table" (e.g. "chat.first_exchange_lifecycle").
 	if anySession != nil {
 		progressTable := fmt.Sprintf("%s.%s", cdcKeyspace, config.ProgressTable)
-		clearTableCheckpoint(anySession, progressTable, scyllaTable, s.Logger)
+		progressTableName := cdcKeyspace + "." + scyllaTable
+		clearTableCheckpoint(anySession, progressTable, progressTableName, s.Logger)
 	}
 
 	// Both CDC + ClickHouse table verified — save to config
