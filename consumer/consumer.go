@@ -102,43 +102,27 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 	for _, row := range change.Delta {
 		op := row.GetOperation()
 
-		// FIX #12: Classify delete operations — emit soft delete rows instead of skipping.
-		isRowDelete := op == scyllacdc.RowDelete ||
-			op == scyllacdc.OperationType(-3) // ServiceRowDelete (TTL expiry)
-		isPartitionDelete := op == scyllacdc.PartitionDelete ||
-			op == scyllacdc.OperationType(-4) // ServicePartitionDelete (TTL expiry)
-		isRangeDelete := op == scyllacdc.RangeDeleteStartInclusive ||
+		// Skip ALL delete types — ClickHouse ReplacingMergeTree handles dedup, not deletes.
+		// Covers:
+		//   3 = RowDelete          (DELETE ... WHERE pk = ? AND ck = ?)
+		//   4 = PartitionDelete    (DELETE FROM ... WHERE pk = ?)
+		//   5 = RangeDeleteStartInclusive  (DELETE ... WHERE ck >= ?)
+		//   6 = RangeDeleteStartExclusive  (DELETE ... WHERE ck > ?)
+		//   7 = RangeDeleteEndInclusive    (DELETE ... WHERE ck <= ?)
+		//   8 = RangeDeleteEndExclusive    (DELETE ... WHERE ck < ?)
+		//  -3 = ServiceRowDelete       (per-row TTL expiry, ScyllaDB 2026.2+)
+		//  -4 = ServicePartitionDelete (per-partition TTL expiry, ScyllaDB 2026.2+)
+		// Without this, range deletes and TTL expirations would be written to ClickHouse
+		// as spurious data rows with only PK columns populated — data corruption.
+		isDelete := op == scyllacdc.RowDelete ||
+			op == scyllacdc.PartitionDelete ||
+			op == scyllacdc.RangeDeleteStartInclusive ||
 			op == scyllacdc.RangeDeleteStartExclusive ||
 			op == scyllacdc.RangeDeleteEndInclusive ||
-			op == scyllacdc.RangeDeleteEndExclusive
-		if isRangeDelete {
-			// Range deletes can't be converted to soft deletes — we can't enumerate affected PKs.
-			// Log and skip (same as before). These are rare in practice.
-			c.logger.Printf("WARN table=%s: range delete operation=%d skipped (cannot enumerate PKs for soft delete)", c.shortTableName(), op)
-			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc()
-			continue
-		}
-
-		if isRowDelete || isPartitionDelete {
-			// FIX #12: Soft delete support.
-			// Only emit _cdc_is_deleted=1 rows when auto_create is on (table guaranteed to have the column).
-			// For manually-created tables (auto_create=false, FRND's mode), skip deletes (old behavior)
-			// to avoid DLQ pollution — the ClickHouse table may not have the _cdc_is_deleted column.
-			// To enable soft deletes on manual tables: ALTER TABLE ADD COLUMN _cdc_is_deleted UInt8 DEFAULT 0
-			// and switch to auto_create, or add a soft_delete config flag (future).
-			if c.factory.getConfig().Tables.AutoCreate {
-				values := c.extractValues(row)
-				cdcTime := change.Time.Time()
-				values["_cdc_ts"] = cdcTime.UTC()
-				values["_cdc_is_deleted"] = uint8(1)
-
-				tableConfig := c.factory.getConfig().GetTableConfig(c.shortTableName())
-				if tableConfig != nil && len(tableConfig.Routes) > 0 {
-					c.routeToTargets(values, tableConfig, onFlush)
-				} else {
-					c.writer.Add(c.chQualifiedName(), values, onFlush)
-				}
-			}
+			op == scyllacdc.RangeDeleteEndExclusive ||
+			op == scyllacdc.OperationType(-3) || // ServiceRowDelete (TTL expiry)
+			op == scyllacdc.OperationType(-4) // ServicePartitionDelete (TTL expiry)
+		if isDelete {
 			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc()
 			continue
 		}

@@ -238,12 +238,8 @@ func (d *Discoverer) AutoCreateCHTable(
 	}
 
 	// Add CDC metadata columns
-	ddl.WriteString("    `_cdc_ts` DateTime64(6) DEFAULT now64(),\n")
-	// FIX #12: Soft delete support — ReplacingMergeTree uses _cdc_is_deleted as the
-	// is_deleted column (ClickHouse 23.2+). Rows with _cdc_is_deleted=1 are removed
-	// during OPTIMIZE FINAL or background merges instead of staying as stale data.
-	ddl.WriteString("    `_cdc_is_deleted` UInt8 DEFAULT 0\n")
-	ddl.WriteString(") ENGINE = ReplacingMergeTree(_cdc_ts, _cdc_is_deleted)\n")
+	ddl.WriteString("    `_cdc_ts` DateTime64(6) DEFAULT now64()\n")
+	ddl.WriteString(") ENGINE = ReplacingMergeTree(_cdc_ts)\n")
 	// Backtick-quote PK columns in ORDER BY (consistent with column definitions above)
 	quotedPK := make([]string, len(pkColumns))
 	for i, pk := range pkColumns {
