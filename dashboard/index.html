@@ -54,7 +54,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 .total-card:nth-child(4) { border-left-color: var(--cyan); }
 .total-card .label { font-size: 0.7rem; color: var(--fg2); text-transform: uppercase; }
 .total-card .value { font-size: 1.3rem; margin-top: 0.25rem; }
-.total-card .hint { font-size: 0.6rem; color: var(--fg2); margin-top: 0.15rem; font-style: italic; }
+.total-card .hint { font-size: 0.65rem; color: var(--fg2); margin-top: 0.15rem; font-style: italic; }
 
 /* config panel */
 .config-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
@@ -90,24 +90,25 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
   margin-bottom: 0.75rem; }
 .table-card .table-name { font-size: 0.9rem; font-weight: 600; }
 .table-card .table-name .ks { color: var(--fg2); font-weight: 400; }
-.table-card .status-badge { font-size: 0.6rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 600; }
-.table-card .status-badge.running { background: rgba(63,185,80,0.15); color: var(--green); }
-.table-card .status-badge.stopped { background: rgba(248,81,73,0.15); color: var(--red); }
-.table-card .status-badge.isolated { background: rgba(188,140,255,0.15); color: var(--purple); }
+.table-card .status-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 600; }
+.table-card .status-badge.running { background: rgba(63,185,80,0.25); color: #4ade80; }
+.table-card .status-badge.stopped { background: rgba(248,81,73,0.25); color: #f87171; }
+.table-card .status-badge.isolated { background: rgba(188,140,255,0.25); color: #d4b5ff; }
 .table-card .remove-btn { background: none; border: 1px solid var(--border); color: var(--red);
   border-radius: 4px; padding: 0.15rem 0.5rem; cursor: pointer; font-family: var(--mono);
   font-size: 0.7rem; }
 .table-card .remove-btn:hover { background: var(--red); color: var(--bg); }
 .table-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   gap: 0.5rem; }
+.table-metrics.secondary-metrics { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--bg3); }
 .metric { font-size: 0.75rem; cursor: help; }
-.metric .metric-label { color: var(--fg2); border-bottom: 1px dotted var(--bg3); display: inline-block; }
+.metric .metric-label { color: var(--fg2); border-bottom: 1px dotted var(--bg3); display: inline-block; letter-spacing: 0.02em; }
 .metric .metric-value { margin-top: 0.15rem; font-size: 0.85rem; }
-.metric .metric-value.warn { color: var(--yellow); }
-.metric .metric-value.bad { color: var(--red); }
-.metric .metric-value.stale-ok { color: #4ade80; }
-.metric .metric-value.stale-warning { color: #fbbf24; }
-.metric .metric-value.stale-danger { color: #f87171; }
+.metric .metric-value.warn { color: #fbbf24; background: rgba(251,191,36,0.12); padding: 0.1rem 0.35rem; border-radius: 3px; }
+.metric .metric-value.bad { color: #ff6b6b; background: rgba(248,81,73,0.15); padding: 0.1rem 0.35rem; border-radius: 3px; }
+.metric .metric-value.stale-ok { color: #4ade80; background: rgba(74,222,128,0.10); padding: 0.1rem 0.35rem; border-radius: 3px; }
+.metric .metric-value.stale-warning { color: #fbbf24; background: rgba(251,191,36,0.12); padding: 0.1rem 0.35rem; border-radius: 3px; }
+.metric .metric-value.stale-danger { color: #f87171; background: rgba(248,113,113,0.15); padding: 0.1rem 0.35rem; border-radius: 3px; }
 
 /* sparkline charts */
 .spark-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; margin-top: 0.75rem;
@@ -147,8 +148,8 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
 #toast { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: var(--bg2); border: 1px solid var(--border);
   border-radius: 6px; padding: 0.75rem 1.25rem; font-size: 0.85rem; display: none; z-index: 100;
   max-width: 500px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); animation: slideDown 0.3s ease; }
-#toast.error { border-color: var(--red); background: rgba(248,81,73,0.15); color: var(--red); max-width: 700px; text-align: left; }
-#toast.ok { border-color: var(--green); background: rgba(63,185,80,0.15); color: var(--green); }
+#toast.error { border-color: var(--red); background: rgba(248,81,73,0.2); color: #fecaca; max-width: 700px; text-align: left; }
+#toast.ok { border-color: var(--green); background: rgba(63,185,80,0.2); color: #bbf7d0; }
 @keyframes slideDown { from { opacity: 0; transform: translateX(-50%) translateY(-1rem); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 
 /* responsive */
@@ -190,7 +191,7 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
     <div class="status-item" id="config-summary" style="color:var(--fg2)"></div>
   </div>
 
-  <div id="error-banner" style="display:none;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:6px;padding:0.6rem 1rem;margin-bottom:1rem;font-size:0.8rem;color:var(--red)"></div>
+  <div id="error-banner" style="display:none;background:rgba(248,81,73,0.2);border:1px solid var(--red);border-left:4px solid var(--red);border-radius:6px;padding:0.6rem 1rem;margin-bottom:1rem;font-size:0.8rem;color:#fecaca"></div>
 
   <div id="config-panel" class="config-panel" style="display:none">
     <div class="config-title">Pipeline Config</div>
@@ -496,7 +497,7 @@ function render() {
     const bufColor = bufPct > 80 ? 'var(--red)' : bufPct > 50 ? 'var(--yellow)' : 'var(--green)';
 
     const hasErrors = (m.reader_errors || 0) > 0 || (m.rows_dlq || 0) > 0;
-    const cardBorder = !t.active ? 'border-left:3px solid var(--red)' : hasErrors ? 'border-left:3px solid var(--yellow)' : 'border-left:3px solid var(--green)';
+    const cardBorder = !t.active ? 'border-left:4px solid var(--red);box-shadow:-2px 0 8px rgba(248,81,73,0.2)' : hasErrors ? 'border-left:4px solid var(--yellow);box-shadow:-2px 0 8px rgba(210,153,34,0.15)' : 'border-left:4px solid var(--green)';
 
     return `<div class="table-card" style="${cardBorder}">
       <div class="table-header">
@@ -504,8 +505,8 @@ function render() {
           <span class="table-name"><span class="ks">${esc(t.keyspace)}.</span>${esc(t.name)}</span>
           <span class="status-badge ${t.active ? 'running' : 'stopped'}">${t.active ? 'streaming' : 'stopped'}</span>
           <span class="status-badge isolated" data-tip="Each table runs its own CDC reader.\nIf this table errors, other tables\ncontinue streaming independently.">isolated</span>
-          ${t.batch_size || t.batch_interval ? `<span class="status-badge" style="background:rgba(56,139,253,0.15);color:var(--blue)" data-tip="Per-table batch config override.\nbatch_size: ${t.batch_size || 'global'}\nbatch_interval: ${t.batch_interval || 'global'}">batch: ${t.batch_size || '?'}/${t.batch_interval || '?'}</span>` : ''}
-          ${t.change_age_limit ? `<span class="status-badge" style="background:rgba(210,153,34,0.15);color:var(--yellow)" data-tip="CDC history window for this table.\nReads this far back on first start\n(when no checkpoint exists).">start: ${t.change_age_limit}</span>` : ''}
+          ${t.batch_size || t.batch_interval ? `<span class="status-badge" style="background:rgba(56,139,253,0.25);color:#79c0ff" data-tip="Per-table batch config override.\nbatch_size: ${t.batch_size || 'global'}\nbatch_interval: ${t.batch_interval || 'global'}">batch: ${t.batch_size || '?'}/${t.batch_interval || '?'}</span>` : ''}
+          ${t.change_age_limit ? `<span class="status-badge" style="background:rgba(210,153,34,0.25);color:#fbbf24" data-tip="CDC history window for this table.\nReads this far back on first start\n(when no checkpoint exists).">start: ${t.change_age_limit}</span>` : ''}
         </span>
         <span style="display:flex;align-items:center;gap:0.5rem">
           <button class="remove-btn" style="color:var(--blue);border-color:var(--border)" data-schema="${escAttr(t.fqn)}">schema</button>
@@ -520,6 +521,8 @@ function render() {
           <div class="bar-gauge"><div class="fill" style="width:${bufPct}%;background:${bufColor}"></div></div>
         </div>
         <div class="metric" data-tip="How far behind real-time the CDC reader is.\n< 5s = healthy, > 60s = falling behind.\nHigh lag = ScyllaDB writes faster than\nClickHouse can absorb."><div class="metric-label">CDC lag</div><div class="metric-value ${lagClass}">${lag !== undefined ? lag.toFixed(1) + 's' : '-'}</div></div>
+      </div>
+      <div class="table-metrics secondary-metrics">
         <div class="metric" data-tip="Median (50th percentile) time to flush\na batch of rows into ClickHouse.\nTypically < 50ms for healthy writes."><div class="metric-label">write p50</div><div class="metric-value">${m.flush_latency_p50 !== undefined ? (m.flush_latency_p50*1000).toFixed(1) + 'ms' : '-'}</div></div>
         <div class="metric" data-tip="99th percentile flush latency — worst-case\nwrite time. If > 500ms, ClickHouse may be\nunder load or network is slow."><div class="metric-label">write p99</div><div class="metric-value">${m.flush_latency_p99 !== undefined ? (m.flush_latency_p99*1000).toFixed(1) + 'ms' : '-'}</div></div>
         <div class="metric" data-tip="Total batch writes to ClickHouse.\nEach write = one INSERT of up to batch_size rows.\nErrors shown in red if any."><div class="metric-label">batch writes</div><div class="metric-value">${fmt(m.flushes_ok)}${m.flushes_error ? ' / <span class="bad">' + fmt(m.flushes_error) + ' err</span>' : ''}</div></div>
