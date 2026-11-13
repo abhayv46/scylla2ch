@@ -67,6 +67,13 @@ import (
 	"scylla2ch/config"
 )
 
+// FIX #11: Atomic health flags — readable without Prometheus internals.
+// Set alongside the Prometheus gauges; used by the watchdog to gate WATCHDOG=1.
+var (
+	ScyllaHealthy     atomic.Int32 // 1 = connected, 0 = disconnected
+	ClickHouseHealthy atomic.Int32 // 1 = connected, 0 = disconnected
+)
+
 // --- Daily counters (reset at midnight IST, for dashboard display) ---
 // These are NOT Prometheus metrics — Prometheus counters stay cumulative.
 // The dashboard shows "today" numbers from these.

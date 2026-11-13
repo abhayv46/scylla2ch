@@ -230,6 +230,24 @@ func (w *ClickHouseWriter) GetTableBatchConfig(table string) (int, time.Duration
 	return o.Size, o.Interval
 }
 
+// AddMarker sends a checkpoint-only marker to the per-table channel.
+// FIX #4: Markers have nil data — they don't generate INSERT rows but their onFlush
+// callbacks are called in order after preceding data rows are successfully flushed.
+// This ensures Empty() checkpoint advances only after buffered rows are written.
+func (w *ClickHouseWriter) AddMarker(table string, onFlush func()) {
+	if atomic.LoadInt32(&w.closed) == 1 {
+		return
+	}
+	ch := w.getOrCreateChan(table)
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- pendingRow{data: nil, onFlush: onFlush}:
+	case <-w.stopCh:
+	}
+}
+
 // Add sends a row to the per-table channel. Lock-free on the hot path.
 // Blocks if channel is full — this is intentional back-pressure from ClickHouse.
 // Uses select with stopCh to prevent blocking forever after Close().
@@ -392,6 +410,31 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 
 	start := time.Now()
 
+	// FIX #4: Separate markers (data=nil) from data rows.
+	// Markers don't generate INSERT rows but their callbacks are called after data rows flush.
+	dataRows := make([]pendingRow, 0, len(rows))
+	markers := make([]pendingRow, 0)
+	for _, pr := range rows {
+		if pr.data == nil {
+			markers = append(markers, pr)
+		} else {
+			dataRows = append(dataRows, pr)
+		}
+	}
+
+	// If only markers (no data rows), call their callbacks immediately and return
+	if len(dataRows) == 0 {
+		for _, m := range markers {
+			if m.onFlush != nil {
+				m.onFlush()
+			}
+		}
+		return nil
+	}
+
+	// Replace rows with dataRows for the rest of flush (INSERT only data)
+	rows = dataRows
+
 	// Parse qualified name: "database.table" → INSERT INTO `database`.`table`
 	// Falls back to w.db for unqualified names (backward compat with single-keyspace)
 	db, tablePart := w.db, table
@@ -400,10 +443,22 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 		tablePart = table[idx+1:]
 	}
 
+	// FIX #6: Deferred callbacks for poison rows — called after remaining batch succeeds
+	var deferredCallbacks []func()
+
 	// Poison row loop: iteratively remove bad rows and re-flush good ones.
 	// Replaces the old recursive w.flush() call that could stack-overflow with 500+ poison rows.
 	for {
 		if len(rows) == 0 {
+			// All data rows were poison — call deferred + marker callbacks
+			for _, cb := range deferredCallbacks {
+				cb()
+			}
+			for _, m := range markers {
+				if m.onFlush != nil {
+					m.onFlush()
+				}
+			}
 			return nil
 		}
 
@@ -484,9 +539,15 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 					w.logger.Printf("WARNING batch abort error table=%s: %v", table, err)
 				}
 				attemptCancel()
-				w.dlqRow(table, rows[poisonIdx], lastErr)
+				// FIX #5: Guard checkpoint on DLQ failure — don't advance if DLQ write fails
+				if dlqErr := w.dlqRow(table, rows[poisonIdx], lastErr); dlqErr != nil {
+					w.logger.Printf("ERROR DLQ write failed table=%s: %v — checkpoint FROZEN", table, dlqErr)
+					metrics.ErrorsTotal.WithLabelValues("dlq", "error").Inc()
+					return nil // stop processing this batch, checkpoint frozen
+				}
+				// FIX #6: Defer poison row callback — call after remaining rows succeed
 				if rows[poisonIdx].onFlush != nil {
-					rows[poisonIdx].onFlush()
+					deferredCallbacks = append(deferredCallbacks, rows[poisonIdx].onFlush)
 				}
 				metrics.RowsDLQ.WithLabelValues(table).Add(1)
 				// Remove poison row and continue the outer loop (iterative, not recursive)
@@ -514,6 +575,16 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 					pr.onFlush()
 				}
 			}
+			// FIX #6: Call deferred poison row callbacks after batch success
+			for _, cb := range deferredCallbacks {
+				cb()
+			}
+			// FIX #4: Call marker callbacks (Empty checkpoints) after data rows flush
+			for _, m := range markers {
+				if m.onFlush != nil {
+					m.onFlush()
+				}
+			}
 
 			flushedCount := len(rows)
 			elapsed := time.Since(start).Seconds()
@@ -531,6 +602,7 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 			// Restore connected gauge — a successful flush proves ClickHouse is up.
 			// Fixes stale "disconnected" after a failing table is removed while healthy tables flush fine.
 			metrics.ClickHouseConnected.Set(1)
+			metrics.ClickHouseHealthy.Store(1)
 			flushed = true
 			break // break retry loop
 		}
@@ -608,6 +680,7 @@ func (w *ClickHouseWriter) waitForTable(table string) bool {
 // Rows stay in channel buffer, checkpoint frozen, no data loss.
 func (w *ClickHouseWriter) waitForClickHouse(table string) bool {
 	metrics.ClickHouseConnected.Set(0)
+	metrics.ClickHouseHealthy.Store(0)
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -621,6 +694,7 @@ func (w *ClickHouseWriter) waitForClickHouse(table string) bool {
 			if err == nil {
 				w.logger.Printf("ClickHouse recovered — writer RESUMED for table=%s", table)
 				metrics.ClickHouseConnected.Set(1)
+				metrics.ClickHouseHealthy.Store(1)
 				return true
 			}
 			w.logger.Printf("ClickHouse still unreachable for table=%s: %v", table, err)
@@ -711,21 +785,21 @@ func (w *ClickHouseWriter) EnsureDatabase(ctx context.Context, database string) 
 // dlqRow writes a poison row to a DLQ file for investigation.
 // The row failed batch.Append() — structural type mismatch, not transient.
 // File: dlq/<table>.jsonl (one JSON object per line, append-only).
-// DLQ write failure is logged but never blocks the pipeline.
-func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) {
+// FIX #5: Returns error so caller can guard checkpoint — don't advance if DLQ write fails.
+func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) error {
 	// Global DLQ cap (P2-10): prevent unbounded disk usage from N tables × 100MB each
 	globalBytes := atomic.LoadInt64(&w.dlqTotalBytes)
 	if globalBytes > w.cfg.DLQMaxBytes {
 		w.logger.Printf("ERROR global DLQ cap reached (%dMB/%dMB) — poison row for table=%s logged but not saved",
 			globalBytes/(1024*1024), w.cfg.DLQMaxBytes/(1024*1024), table)
 		metrics.ErrorsTotal.WithLabelValues("dlq", "full").Inc()
-		return
+		return fmt.Errorf("global DLQ cap reached (%dMB)", globalBytes/(1024*1024))
 	}
 
 	dlqDir := w.cfg.DLQDir
 	if err := os.MkdirAll(dlqDir, 0755); err != nil {
 		w.logger.Printf("DLQ mkdir error: %v (poison row lost for table=%s)", err, table)
-		return
+		return fmt.Errorf("DLQ mkdir %s: %w", dlqDir, err)
 	}
 
 	safeName := strings.ReplaceAll(table, ".", "_")
@@ -741,13 +815,13 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 	data, err := json.Marshal(entry)
 	if err != nil {
 		w.logger.Printf("DLQ marshal error table=%s: %v (poison row lost)", table, err)
-		return
+		return fmt.Errorf("DLQ marshal: %w", err)
 	}
 
 	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		w.logger.Printf("DLQ file error table=%s path=%s: %v (poison row lost)", table, filePath, err)
-		return
+		return fmt.Errorf("DLQ open %s: %w", filePath, err)
 	}
 	defer f.Close()
 
@@ -755,14 +829,14 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 	if fi, statErr := f.Stat(); statErr == nil && fi.Size() > 100*1024*1024 {
 		w.logger.Printf("ERROR DLQ file too large table=%s size=%dMB — new poison rows will be logged but not saved (fix the schema mismatch)", table, fi.Size()/(1024*1024))
 		metrics.ErrorsTotal.WithLabelValues("dlq", "full").Inc()
-		return
+		return fmt.Errorf("DLQ file too large (%dMB)", fi.Size()/(1024*1024))
 	}
 
 	n, writeErr := f.Write(data)
 	if writeErr != nil || n != len(data) {
 		w.logger.Printf("DLQ write error table=%s: wrote %d/%d bytes: %v (poison row lost)", table, n, len(data), writeErr)
 		metrics.ErrorsTotal.WithLabelValues("dlq", "error").Inc()
-		return
+		return fmt.Errorf("DLQ write: %w", writeErr)
 	}
 	if _, err := f.Write([]byte("\n")); err != nil {
 		w.logger.Printf("DLQ newline error table=%s: %v", table, err)
@@ -775,6 +849,7 @@ func (w *ClickHouseWriter) dlqRow(table string, pr pendingRow, appendErr error) 
 	}
 
 	w.logger.Printf("DLQ poison row table=%s file=%s err=%v", table, filePath, appendErr)
+	return nil
 }
 
 func (w *ClickHouseWriter) Close() error {

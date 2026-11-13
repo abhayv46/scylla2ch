@@ -244,6 +244,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 			sess.Close()
 		}
 		metrics.ScyllaConnected.Set(0)
+		metrics.ScyllaHealthy.Store(0)
 	}()
 
 	// 2. Connect to ClickHouse
@@ -251,13 +252,13 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("clickhouse connect: %w", err)
 	}
-	defer func() {
-		chWriter.Close()
-		metrics.ClickHouseConnected.Set(0)
-	}()
+	// FIX #10: Do NOT defer chWriter.Close() — explicit shutdown sequence after readerWg.Wait()
+	// ensures writer drains before checkpoint flushes. See shutdown block at end of function.
 	logger.Printf("connected to ClickHouse host=%s", cfg.ClickHouse.Host)
 	metrics.ScyllaConnected.Set(1)
+	metrics.ScyllaHealthy.Store(1)
 	metrics.ClickHouseConnected.Set(1)
+	metrics.ClickHouseHealthy.Store(1)
 
 	// Auto-create ClickHouse databases only when auto_create is enabled.
 	// When off, databases are managed manually — skip to avoid noisy permission WARNs.
@@ -393,7 +394,12 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				return
 			case <-ticker.C:
 				metrics.UptimeSeconds.Set(time.Since(startTime).Seconds())
-				sdNotify("WATCHDOG=1")
+				// FIX #11: Only send WATCHDOG=1 if both databases are connected.
+				// A stuck pipeline (ClickHouse down, ScyllaDB session closed) should
+				// NOT send heartbeats — let systemd's WatchdogSec kill + restart us.
+				if metrics.ScyllaHealthy.Load() == 1 && metrics.ClickHouseHealthy.Load() == 1 {
+					sdNotify("WATCHDOG=1")
+				}
 
 				// FIX H5: ScyllaDB health check every 30s (every 3rd tick).
 				// Use sessionMap snapshot instead of stale `sessions` slice —
@@ -412,8 +418,10 @@ func runCDC(cmd *cobra.Command, args []string) error {
 					sessionMu.RUnlock()
 					if allOK {
 						metrics.ScyllaConnected.Set(1)
+						metrics.ScyllaHealthy.Store(1)
 					} else {
 						metrics.ScyllaConnected.Set(0)
+						metrics.ScyllaHealthy.Store(0)
 					}
 				}
 			}
@@ -443,7 +451,8 @@ func runCDC(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("file progress manager: %w", err)
 	}
-	defer filePM.Stop() // final flush on shutdown
+	// FIX #10: Do NOT defer filePM.Stop() — explicit shutdown sequence after readerWg.Wait()
+	// ensures writer drains before checkpoint flushes. See shutdown block at end of function.
 	dashState.ProgressManager = filePM
 
 	var (
@@ -724,8 +733,18 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 	// Wait for all readers to finish (they run until ctx is cancelled by signal or error).
 	readerWg.Wait()
+	logger.Printf("all readers stopped — draining writer buffers")
 
-	logger.Printf("shutdown complete — all readers stopped")
+	// FIX #10: Explicit shutdown order — writer MUST drain before checkpoint flushes.
+	// Old code: defer filePM.Stop() (LIFO = runs FIRST) then defer chWriter.Close() (runs LATER).
+	// This caused checkpoint to flush before writer drained → lost the last batch's onFlush callbacks.
+	chWriter.Close()
+	metrics.ClickHouseConnected.Set(0)
+	metrics.ClickHouseHealthy.Store(0)
+	logger.Printf("writer drained — saving final checkpoint")
+
+	filePM.Stop()
+	logger.Printf("shutdown complete — checkpoint saved")
 	return nil
 }
 

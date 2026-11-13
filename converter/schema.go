@@ -237,7 +237,7 @@ func (d *Discoverer) AutoCreateCHTable(
 		ddl.WriteString(",\n")
 	}
 
-	// Add CDC metadata column
+	// Add CDC metadata columns
 	ddl.WriteString("    `_cdc_ts` DateTime64(6) DEFAULT now64()\n")
 	ddl.WriteString(") ENGINE = ReplacingMergeTree(_cdc_ts)\n")
 	// Backtick-quote PK columns in ORDER BY (consistent with column definitions above)

@@ -101,6 +101,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 	// (postimage mode would fix this but adds extra read per write on ScyllaDB).
 	for _, row := range change.Delta {
 		op := row.GetOperation()
+
 		// Skip ALL delete types — ClickHouse ReplacingMergeTree handles dedup, not deletes.
 		// Covers:
 		//   3 = RowDelete          (DELETE ... WHERE pk = ? AND ck = ?)
@@ -543,8 +544,13 @@ func (c *Consumer) End() error {
 }
 
 // Empty is called when no new rows exist for this stream.
+// FIX #4: Route through writer as a marker (not direct reporter.Update) so that
+// the checkpoint only advances after all preceding buffered rows are flushed.
+// Without this, a crash after Empty but before flush loses buffered rows.
 func (c *Consumer) Empty(ctx context.Context, ackTime gocql.UUID) error {
-	c.reporter.Update(ackTime)
+	c.writer.AddMarker(c.chQualifiedName(), func() {
+		c.reporter.Update(ackTime)
+	})
 	return nil
 }
 

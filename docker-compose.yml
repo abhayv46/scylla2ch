@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
     init: true                       # PID 1 reaping — forwards SIGHUP/SIGTERM correctly
     read_only: true                  # immutable root fs — no writes inside container
-    stop_grace_period: 30s           # time for graceful shutdown (flush all batches)
+    stop_grace_period: 90s           # match systemd TimeoutStopSec: reader cancel + writer drain + checkpoint
     env_file:
       - .env.prod
     environment:
@@ -17,6 +17,7 @@ services:
       - SCYLLA2CH_DASHBOARD_PASS=${DASHBOARD_PASS}
     volumes:
       - ./config/config.prod.yaml:/etc/scylla2ch/config.yaml:ro
+      - scylla2ch-data:/var/lib/scylla2ch    # checkpoint + DLQ (persistent across restarts)
       # Uncomment if using ca_cert_path (file) instead of ca_cert_base64 (env var):
       # - ./certs:/etc/scylla2ch/certs:ro
     tmpfs:
@@ -45,6 +46,9 @@ services:
         max-file: "5"
     security_opt:
       - no-new-privileges:true       # prevent privilege escalation
+
+volumes:
+  scylla2ch-data:                    # persistent: checkpoint file + DLQ files survive restarts
 
 # ─── Operations ───────────────────────────────────────────────────────
 #
