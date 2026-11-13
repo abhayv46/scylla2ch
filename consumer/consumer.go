@@ -122,7 +122,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 			op == scyllacdc.OperationType(-3) || // ServiceRowDelete (TTL expiry)
 			op == scyllacdc.OperationType(-4) // ServicePartitionDelete (TTL expiry)
 		if isDelete {
-			metrics.DeletesSkipped.WithLabelValues(c.shortTableName()).Inc()
+			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc()
 			continue
 		}
 
@@ -148,9 +148,10 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 			c.writer.Add(c.chQualifiedName(), values, onFlush)
 		}
 
-		metrics.RowsConsumed.WithLabelValues(c.shortTableName()).Inc()
-		metrics.IncDailyConsumed(c.shortTableName())
-		metrics.LastConsumedTimestampMs.WithLabelValues(c.shortTableName()).Set(float64(time.Now().UnixMilli()))
+		metricLabel := c.chQualifiedName() // must match writer label (qualified name)
+		metrics.RowsConsumed.WithLabelValues(metricLabel).Inc()
+		metrics.IncDailyConsumed(metricLabel)
+		metrics.LastConsumedTimestampMs.WithLabelValues(metricLabel).Set(float64(time.Now().UnixMilli()))
 		// Track CDC replication lag (how far behind real-time we are).
 		// Clamp to 0: clock skew on a ScyllaDB node can produce future _cdc_ts,
 		// which makes lag negative and confuses dashboards/alerts (P2-9).
@@ -158,7 +159,7 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 		if lag < 0 {
 			lag = 0
 		}
-		metrics.CDCLagSeconds.WithLabelValues(c.shortTableName()).Set(lag)
+		metrics.CDCLagSeconds.WithLabelValues(metricLabel).Set(lag)
 	}
 
 	return nil

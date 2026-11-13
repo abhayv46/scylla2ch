@@ -505,7 +505,7 @@ func runCDC(cmd *cobra.Command, args []string) error {
 
 		logger.Printf("starting CDC reader for %s", tableName)
 		readerWg.Add(1)
-		go func(tblName string) {
+		go func(tblName, fqn string) {
 			defer readerWg.Done()
 			defer metrics.TablesActive.Dec()
 			defer func() {
@@ -546,13 +546,13 @@ func runCDC(cmd *cobra.Command, args []string) error {
 				// One broken table does NOT take down the entire pipeline.
 				// Mark as stopped so dashboard shows the error. Restart via SIGHUP or dashboard.
 				logger.Printf("ERROR reader %s: %v — reader stopped (other tables continue, restart via dashboard or SIGHUP)", tblName, runErr)
-				metrics.ReaderErrorsTotal.WithLabelValues(tblName).Inc()
+				metrics.ReaderErrorsTotal.WithLabelValues(fqn).Inc()
 				metrics.ErrorsTotal.WithLabelValues("reader", "error").Inc()
 				runningMu.Lock()
 				delete(running, tblName)
 				runningMu.Unlock()
 			}
-		}(tableName)
+		}(tableName, keyspace+"."+tableName)
 
 		metrics.TablesActive.Inc()
 		return nil
