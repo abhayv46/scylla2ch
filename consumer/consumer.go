@@ -101,28 +101,39 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 	// (postimage mode would fix this but adds extra read per write on ScyllaDB).
 	for _, row := range change.Delta {
 		op := row.GetOperation()
-		// Skip ALL delete types — ClickHouse ReplacingMergeTree handles dedup, not deletes.
-		// Covers:
-		//   3 = RowDelete          (DELETE ... WHERE pk = ? AND ck = ?)
-		//   4 = PartitionDelete    (DELETE FROM ... WHERE pk = ?)
-		//   5 = RangeDeleteStartInclusive  (DELETE ... WHERE ck >= ?)
-		//   6 = RangeDeleteStartExclusive  (DELETE ... WHERE ck > ?)
-		//   7 = RangeDeleteEndInclusive    (DELETE ... WHERE ck <= ?)
-		//   8 = RangeDeleteEndExclusive    (DELETE ... WHERE ck < ?)
-		//  -3 = ServiceRowDelete       (per-row TTL expiry, ScyllaDB 2026.2+)
-		//  -4 = ServicePartitionDelete (per-partition TTL expiry, ScyllaDB 2026.2+)
-		// Without this, range deletes and TTL expirations would be written to ClickHouse
-		// as spurious data rows with only PK columns populated — data corruption.
-		isDelete := op == scyllacdc.RowDelete ||
-			op == scyllacdc.PartitionDelete ||
-			op == scyllacdc.RangeDeleteStartInclusive ||
+
+		// FIX #12: Classify delete operations — emit soft delete rows instead of skipping.
+		isRowDelete := op == scyllacdc.RowDelete ||
+			op == scyllacdc.OperationType(-3) // ServiceRowDelete (TTL expiry)
+		isPartitionDelete := op == scyllacdc.PartitionDelete ||
+			op == scyllacdc.OperationType(-4) // ServicePartitionDelete (TTL expiry)
+		isRangeDelete := op == scyllacdc.RangeDeleteStartInclusive ||
 			op == scyllacdc.RangeDeleteStartExclusive ||
 			op == scyllacdc.RangeDeleteEndInclusive ||
-			op == scyllacdc.RangeDeleteEndExclusive ||
-			op == scyllacdc.OperationType(-3) || // ServiceRowDelete (TTL expiry)
-			op == scyllacdc.OperationType(-4) // ServicePartitionDelete (TTL expiry)
-		if isDelete {
+			op == scyllacdc.RangeDeleteEndExclusive
+		if isRangeDelete {
+			// Range deletes can't be converted to soft deletes — we can't enumerate affected PKs.
+			// Log and skip (same as before). These are rare in practice.
+			c.logger.Printf("WARN table=%s: range delete operation=%d skipped (cannot enumerate PKs for soft delete)", c.shortTableName(), op)
 			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc()
+			continue
+		}
+
+		if isRowDelete || isPartitionDelete {
+			// FIX #12: Emit a soft delete row with PK columns + _cdc_is_deleted=1.
+			// ReplacingMergeTree(_cdc_ts, _cdc_is_deleted) removes these during merge.
+			values := c.extractValues(row)
+			cdcTime := change.Time.Time()
+			values["_cdc_ts"] = cdcTime.UTC()
+			values["_cdc_is_deleted"] = uint8(1)
+
+			tableConfig := c.factory.getConfig().GetTableConfig(c.shortTableName())
+			if tableConfig != nil && len(tableConfig.Routes) > 0 {
+				c.routeToTargets(values, tableConfig, onFlush)
+			} else {
+				c.writer.Add(c.chQualifiedName(), values, onFlush)
+			}
+			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc() // keep metric name for backward compat
 			continue
 		}
 
@@ -543,8 +554,13 @@ func (c *Consumer) End() error {
 }
 
 // Empty is called when no new rows exist for this stream.
+// FIX #4: Route through writer as a marker (not direct reporter.Update) so that
+// the checkpoint only advances after all preceding buffered rows are flushed.
+// Without this, a crash after Empty but before flush loses buffered rows.
 func (c *Consumer) Empty(ctx context.Context, ackTime gocql.UUID) error {
-	c.reporter.Update(ackTime)
+	c.writer.AddMarker(c.chQualifiedName(), func() {
+		c.reporter.Update(ackTime)
+	})
 	return nil
 }
 

@@ -213,6 +213,16 @@ header .meta { font-size: 0.75rem; color: var(--fg2); text-align: right; }
         <span id="cfg-auto-discover" style="font-size:0.75rem">-</span>
       </div>
     </div>
+    <div class="config-row" style="margin-top:0.5rem;font-size:0.7rem;color:var(--fg2)">
+      <div class="config-item" data-tip="Per-stream checkpoint count.\nEach CDC stream has its own progress.\nPrevents restart from skipping slow streams.">
+        <label>checkpoint</label>
+        <span id="cfg-checkpoint-info" style="font-size:0.75rem;color:var(--cyan)">-</span>
+      </div>
+      <div class="config-item" data-tip="Dead Letter Queue directory.\nPoison rows (type mismatches) are written here.\nCheckpoint frozen if DLQ write fails.">
+        <label>DLQ dir</label>
+        <span id="cfg-dlq-dir" style="font-size:0.75rem;color:var(--fg2)">-</span>
+      </div>
+    </div>
   </div>
 
   <div class="totals">
@@ -463,6 +473,15 @@ function render() {
   const c = statusData.config;
   $('config-summary').textContent = (c.auto_discover ? 'auto-discover' : 'manual') +
     ' | batch=' + c.batch_size + ' | interval=' + c.batch_interval;
+
+  // Checkpoint + DLQ info
+  const cp = statusData.checkpoint;
+  if (cp) {
+    $('cfg-checkpoint-info').textContent = cp.tables + ' tables / ' + cp.streams + ' streams';
+  }
+  if (c.dlq_dir) {
+    $('cfg-dlq-dir').textContent = c.dlq_dir;
+  }
 
   // Config panel (owner only)
   const cfgPanel = $('config-panel');

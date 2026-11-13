@@ -23,7 +23,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=120
-TimeoutStopSec=30
+# FIX #11: Bump to 90s — reader cancel (30s) + writer drain + checkpoint flush
+TimeoutStopSec=90
 WatchdogSec=300
 KillMode=control-group
 EnvironmentFile=/etc/scylla2ch/env
@@ -42,7 +43,9 @@ CPUQuota=200%
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/scylla2ch /run
+# FIX #5: Add /var/lib/scylla2ch for DLQ files (writable under ProtectSystem=strict)
+StateDirectory=scylla2ch
+ReadWritePaths=/etc/scylla2ch /run /var/lib/scylla2ch
 PrivateTmp=true
 
 [Install]

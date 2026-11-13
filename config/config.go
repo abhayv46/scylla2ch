@@ -352,7 +352,9 @@ func Load(path string) (*Config, error) {
 		cfg.Batch.FlushTimeout = 2 * time.Minute
 	}
 	if cfg.Batch.DLQDir == "" {
-		cfg.Batch.DLQDir = "dlq"
+		// FIX #5: Use absolute path writable under systemd ProtectSystem=strict.
+		// Relative "dlq" is unwritable when working dir is under /usr or /etc.
+		cfg.Batch.DLQDir = "/var/lib/scylla2ch/dlq"
 	}
 	if cfg.Batch.DLQMaxBytes == 0 {
 		cfg.Batch.DLQMaxBytes = 1024 * 1024 * 1024 // 1 GB global cap

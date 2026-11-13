@@ -235,8 +235,24 @@ func NewMux(s *State) http.Handler {
 
 	// Health — no auth, Docker healthcheck
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		// FIX #11: Health endpoint now reflects actual pipeline health.
+		// Returns 503 if either database is disconnected — load balancers stop routing.
+		scyllaOK := metrics.ScyllaHealthy.Load() == 1
+		chOK := metrics.ClickHouseHealthy.Load() == 1
+		if scyllaOK && chOK {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			msg := "unhealthy:"
+			if !scyllaOK {
+				msg += " scylla=down"
+			}
+			if !chOK {
+				msg += " clickhouse=down"
+			}
+			_, _ = w.Write([]byte(msg))
+		}
 	})
 
 	// Periodic session + login attempts cleanup (every 10 minutes)
@@ -437,6 +453,16 @@ func NewMux(s *State) http.Handler {
 		scyllaConn := readGaugeValue("scylla2ch_scylla_connected")
 		chConn := readGaugeValue("scylla2ch_clickhouse_connected")
 
+		// Checkpoint info for dashboard
+		var checkpointTables, checkpointStreams int
+		if s.ProgressManager != nil {
+			checkpointTables = s.ProgressManager.TableCount()
+		}
+		// StreamCount exposed via interface if available
+		if sc, ok := s.ProgressManager.(interface{ StreamCount() int }); ok {
+			checkpointStreams = sc.StreamCount()
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"version":             s.Version,
 			"uptime_seconds":      time.Since(s.StartTime).Seconds(),
@@ -445,10 +471,16 @@ func NewMux(s *State) http.Handler {
 			"clickhouse_connected": chConn == 1,
 			"role":                sessionRole(r),
 			"config": map[string]interface{}{
-				"auto_discover": s.Config.Tables.AutoDiscover,
-				"auto_create":   s.Config.Tables.AutoCreate,
-				"batch_size":    s.Config.Batch.Size,
+				"auto_discover":  s.Config.Tables.AutoDiscover,
+				"auto_create":    s.Config.Tables.AutoCreate,
+				"batch_size":     s.Config.Batch.Size,
 				"batch_interval": s.Config.Batch.Interval.String(),
+				"dlq_dir":        s.Config.Batch.DLQDir,
+			},
+			"checkpoint": map[string]interface{}{
+				"tables":  checkpointTables,
+				"streams": checkpointStreams,
+				"file":    s.Config.CDC.CheckpointFile,
 			},
 		})
 	}))
