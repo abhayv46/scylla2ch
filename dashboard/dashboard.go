@@ -1467,8 +1467,10 @@ func compareSchema(scyllaSession *gocql.Session, keyspace, table, chFQN string, 
 	for scyllaCol, cqlType := range scyllaCols {
 		chType, exists := chColMap[scyllaCol]
 		if !exists {
-			// Column missing in ClickHouse — this is OK (CDC delta mode), just note it
-			warnings = append(warnings, fmt.Sprintf("column '%s' (%s) exists in ScyllaDB but not in ClickHouse — will be skipped", scyllaCol, cqlType))
+			// Column missing in ClickHouse — CDC data WILL include it, INSERT will fail.
+			// Block the add: user must ALTER TABLE to add the column first.
+			expectedCH := converter.CQLToClickHouseType(cqlType, false)
+			errors = append(errors, fmt.Sprintf("column '%s' (%s) missing in ClickHouse — add it: ALTER TABLE %s ADD COLUMN IF NOT EXISTS `%s` %s", scyllaCol, cqlType, chFQN, scyllaCol, expectedCH))
 			continue
 		}
 		// Compare expected type vs actual — mismatch = error (blocks save, prevents poison rows)

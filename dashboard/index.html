@@ -605,7 +605,7 @@ function showSchemaModal(data) {
     let statusIcon = '', color = 'var(--fg)';
     if (c.status === 'ok') { statusIcon = '✓'; color = 'var(--green)'; }
     else if (c.status === 'mismatch') { statusIcon = '✗'; color = 'var(--red)'; }
-    else if (c.status === 'missing_in_ch') { statusIcon = '—'; color = 'var(--yellow)'; }
+    else if (c.status === 'missing_in_ch') { statusIcon = '✗'; color = 'var(--red)'; }
     else if (c.status === 'missing_in_scylla') { statusIcon = '—'; color = 'var(--fg2)'; }
     else if (c.status === 'cdc_meta') { statusIcon = '⚙'; color = 'var(--blue)'; }
     return `<tr style="color:${color}">
@@ -625,7 +625,7 @@ function showSchemaModal(data) {
     <div style="display:flex;gap:1rem;margin-bottom:1rem;font-size:0.75rem">
       <span style="color:var(--green)">✓ ${data.total_columns - data.mismatches - data.missing_in_ch - data.missing_in_scylla} matched</span>
       <span style="color:var(--red)">${data.mismatches > 0 ? '✗ ' + data.mismatches + ' type mismatch' : ''}</span>
-      <span style="color:var(--yellow)">${data.missing_in_ch > 0 ? '— ' + data.missing_in_ch + ' missing in CH' : ''}</span>
+      <span style="color:var(--red)">${data.missing_in_ch > 0 ? '✗ ' + data.missing_in_ch + ' missing in CH (blocks add)' : ''}</span>
     </div>
     <table style="width:100%;border-collapse:collapse;font-size:0.75rem">
       <thead><tr style="color:var(--fg2);border-bottom:1px solid var(--border)">
