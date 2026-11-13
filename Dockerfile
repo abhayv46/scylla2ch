@@ -40,9 +40,9 @@ RUN apk --no-cache add ca-certificates tzdata
 # Non-root user
 RUN addgroup -S scylla2ch && adduser -S -G scylla2ch scylla2ch
 
-# Config directory for volume mounts
-RUN mkdir -p /etc/scylla2ch/certs /etc/scylla2ch/tables.d && \
-    chown -R scylla2ch:scylla2ch /etc/scylla2ch
+# Config directory for volume mounts + data directory for checkpoint + DLQ
+RUN mkdir -p /etc/scylla2ch/certs /etc/scylla2ch/tables.d /var/lib/scylla2ch/dlq && \
+    chown -R scylla2ch:scylla2ch /etc/scylla2ch /var/lib/scylla2ch
 
 COPY --from=builder /scylla2ch /usr/local/bin/scylla2ch
 
