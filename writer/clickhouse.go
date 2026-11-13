@@ -528,6 +528,9 @@ func (w *ClickHouseWriter) flush(table string, rows []pendingRow, ch chan pendin
 			if attempt > 0 {
 				metrics.RetriesTotal.WithLabelValues(table).Add(float64(attempt))
 			}
+			// Restore connected gauge — a successful flush proves ClickHouse is up.
+			// Fixes stale "disconnected" after a failing table is removed while healthy tables flush fine.
+			metrics.ClickHouseConnected.Set(1)
 			flushed = true
 			break // break retry loop
 		}
