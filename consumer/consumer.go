@@ -120,20 +120,26 @@ func (c *Consumer) Consume(ctx context.Context, change scyllacdc.Change) error {
 		}
 
 		if isRowDelete || isPartitionDelete {
-			// FIX #12: Emit a soft delete row with PK columns + _cdc_is_deleted=1.
-			// ReplacingMergeTree(_cdc_ts, _cdc_is_deleted) removes these during merge.
-			values := c.extractValues(row)
-			cdcTime := change.Time.Time()
-			values["_cdc_ts"] = cdcTime.UTC()
-			values["_cdc_is_deleted"] = uint8(1)
+			// FIX #12: Soft delete support.
+			// Only emit _cdc_is_deleted=1 rows when auto_create is on (table guaranteed to have the column).
+			// For manually-created tables (auto_create=false, FRND's mode), skip deletes (old behavior)
+			// to avoid DLQ pollution — the ClickHouse table may not have the _cdc_is_deleted column.
+			// To enable soft deletes on manual tables: ALTER TABLE ADD COLUMN _cdc_is_deleted UInt8 DEFAULT 0
+			// and switch to auto_create, or add a soft_delete config flag (future).
+			if c.factory.getConfig().Tables.AutoCreate {
+				values := c.extractValues(row)
+				cdcTime := change.Time.Time()
+				values["_cdc_ts"] = cdcTime.UTC()
+				values["_cdc_is_deleted"] = uint8(1)
 
-			tableConfig := c.factory.getConfig().GetTableConfig(c.shortTableName())
-			if tableConfig != nil && len(tableConfig.Routes) > 0 {
-				c.routeToTargets(values, tableConfig, onFlush)
-			} else {
-				c.writer.Add(c.chQualifiedName(), values, onFlush)
+				tableConfig := c.factory.getConfig().GetTableConfig(c.shortTableName())
+				if tableConfig != nil && len(tableConfig.Routes) > 0 {
+					c.routeToTargets(values, tableConfig, onFlush)
+				} else {
+					c.writer.Add(c.chQualifiedName(), values, onFlush)
+				}
 			}
-			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc() // keep metric name for backward compat
+			metrics.DeletesSkipped.WithLabelValues(c.chQualifiedName()).Inc()
 			continue
 		}
 
